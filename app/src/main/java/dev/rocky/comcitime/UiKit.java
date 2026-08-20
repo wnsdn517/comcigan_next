@@ -126,7 +126,7 @@ public class UiKit {
         t.setTextSize(12);
     }
 
-    private static int darken(int color, float factor) {
+    public static int darken(int color, float factor) {
         int a = (color >> 24) & 0xFF;
         int r = (int) (((color >> 16) & 0xFF) * factor);
         int g = (int) (((color >> 8) & 0xFF) * factor);

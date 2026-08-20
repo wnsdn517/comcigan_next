@@ -51,6 +51,12 @@ public class Prefs {
         return sp.getInt("subjcolor_" + subject, 0) != 0;
     }
 
+    // When on, timetable cells are filled with the full, solid subject
+    // color instead of a muted blend with the background, and a changed
+    // period is shown as a darker shade of that same color.
+    public boolean solidTimetableColor() { return sp.getBoolean("solidTimetableColor", false); }
+    public void setSolidTimetableColor(boolean v) { sp.edit().putBoolean("solidTimetableColor", v).apply(); }
+
     // Every subject name ever seen, so the color-settings screen has
     // something to list even before today's fetch completes again.
     public java.util.Set<String> knownSubjects() {

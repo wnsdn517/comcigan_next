@@ -44,6 +44,7 @@ public class MainActivity extends Activity {
     private LinearLayout[] pages;
     private Button[] tabButtons;
     private static final String[] TAB_NAMES = {"시간표", "급식", "설정"};
+    private static final String[] TAB_ICONS = {"📅", "🍱", "⚙️"};
 
     private TextView classHeaderLabel;
     private TextView teacherModeIndicator;
@@ -70,6 +71,7 @@ public class MainActivity extends Activity {
     private LinearLayout colorsList;
     private String pendingSchoolCode = "", pendingSchoolName = "";
     private CheckBox notifyChangeCheck, notifyPeriodCheck, notifyMorningCheck, liveNotifyCheck;
+    private CheckBox solidColorCheck;
     private EditText morningTimeInput;
     private EditText[] periodInputs = new EditText[8];
     private EditText neisKeyInput;
@@ -136,26 +138,37 @@ public class MainActivity extends Activity {
         tabButtons = new Button[TAB_NAMES.length];
         for (int i = 0; i < TAB_NAMES.length; i++) {
             Button b = new Button(this);
-            b.setText(TAB_NAMES[i]);
+            b.setText(TAB_ICONS[i] + "  " + TAB_NAMES[i]);
             b.setTextSize(13);
             b.setAllCaps(false);
             b.setElevation(0);
             b.setStateListAnimator(null);
             b.setBackground(null);
+            b.setPadding(dp(4), dp(8), dp(4), dp(8));
             final int idx = i;
             b.setOnClickListener(v -> { UiKit.popIn(v); showPage(idx); });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.setMargins(dp(3), 0, dp(3), 0);
             wrap.addView(b, lp);
             tabButtons[i] = b;
         }
         return wrap;
     }
 
+    private GradientDrawable activeTabBg() {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(blend(UiKit.ACCENT, UiKit.SURFACE, 0.16f));
+        d.setCornerRadius(dp(999));
+        return d;
+    }
+
     private void showPage(int index) {
         for (int i = 0; i < pages.length; i++) {
             pages[i].setVisibility(i == index ? View.VISIBLE : View.GONE);
-            tabButtons[i].setTextColor(i == index ? UiKit.ACCENT : UiKit.TEXT_SECONDARY);
-            tabButtons[i].setTypeface(i == index ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            boolean active = i == index;
+            tabButtons[i].setTextColor(active ? UiKit.ACCENT : UiKit.TEXT_SECONDARY);
+            tabButtons[i].setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            tabButtons[i].setBackground(active ? activeTabBg() : null);
         }
         nowPanelHandler.removeCallbacksAndMessages(null);
         if (index == 0) { loadAllWeeks(); tickNowPanel(); }
@@ -659,7 +672,8 @@ public class MainActivity extends Activity {
                             .setInterpolator(new OvershootInterpolator(4f)).start();
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     if (longPressFired[0]) {
-                        if (!teacherViewLocked) exitTeacherView();
+                        if (teacherViewLocked) commitTeacherViewInline();
+                        else exitTeacherView();
                     } else if (!moved[0]) {
                         if (viewingTeacherName != null) {
                             exitTeacherView();
@@ -703,7 +717,11 @@ public class MainActivity extends Activity {
     private void fillCell(LinearLayout cell, String subject, String subLabel, boolean changed) {
         int color = prefs.subjectColor(subject);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(blend(color, UiKit.SURFACE, 0.72f));
+        if (prefs.solidTimetableColor()) {
+            bg.setColor(changed ? UiKit.darken(color, 0.6f) : color);
+        } else {
+            bg.setColor(blend(color, UiKit.SURFACE, 0.72f));
+        }
         bg.setCornerRadius(dp(6));
         cell.setBackground(bg);
         cell.setPadding(dp(4), dp(5), dp(4), dp(5));
@@ -815,6 +833,19 @@ public class MainActivity extends Activity {
         teacherModeIndicator.setText("\ud83d\udd12 " + viewingTeacherName + " 선생님 시간표 고정됨 -- 탭하면 해제");
     }
 
+    // Called once the finger lifts after a locked long-press. The drag
+    // gesture is over by now, so it's safe to rebuild the main grid in
+    // teacher mode in place -- doing this DURING the drag (finger still
+    // down) is what caused the old "flashes then immediately reverts" bug,
+    // since rebuilding detaches the actively-touched cell and Android
+    // cancels the gesture. The floating preview sheet stays for the live
+    // drag feedback; only the final, committed state moves into the table.
+    private void commitTeacherViewInline() {
+        teacherPreviewOverlay.animate().alpha(0f).setDuration(120)
+                .withEndAction(() -> teacherPreviewOverlay.setVisibility(View.GONE)).start();
+        rerenderAllSections();
+    }
+
     private void exitTeacherView() {
         if (viewingTeacherName == null) return;
         viewingTeacherName = null;
@@ -822,6 +853,7 @@ public class MainActivity extends Activity {
         teacherModeIndicator.setVisibility(View.GONE);
         teacherPreviewOverlay.animate().alpha(0f).setDuration(120)
                 .withEndAction(() -> teacherPreviewOverlay.setVisibility(View.GONE)).start();
+        rerenderAllSections();
     }
 
     private void renderTeacherPreview(String teacherName) {
@@ -1271,6 +1303,18 @@ public class MainActivity extends Activity {
         section.setVisibility(View.GONE);
         section.setPadding(0, dp(4), 0, dp(16));
 
+        LinearLayout displayCard = card();
+        displayCard.addView(eyebrow("표시 방식"));
+        solidColorCheck = styledCheckbox("단색으로 표시 (변동은 진한 색)");
+        LinearLayout.LayoutParams solidLp = matchWrap();
+        solidLp.topMargin = dp(4);
+        displayCard.addView(solidColorCheck, solidLp);
+        solidColorCheck.setOnCheckedChangeListener((b, checked) -> {
+            prefs.setSolidTimetableColor(checked);
+            rerenderAllSections();
+        });
+        section.addView(displayCard, cardLp());
+
         LinearLayout colorsCard = card();
         colorsCard.addView(eyebrow("과목 색상"));
         colorsList = new LinearLayout(this);
@@ -1622,6 +1666,7 @@ public class MainActivity extends Activity {
         c.setOrientation(LinearLayout.VERTICAL);
         c.setBackground(UiKit.card());
         c.setPadding(dp(14), dp(14), dp(14), dp(14));
+        c.setElevation(dp(2));
         return c;
     }
 
@@ -1682,6 +1727,7 @@ public class MainActivity extends Activity {
         notifyPeriodCheck.setChecked(prefs.notifyPeriod());
         notifyMorningCheck.setChecked(prefs.notifyMorning());
         liveNotifyCheck.setChecked(prefs.liveNotify());
+        solidColorCheck.setChecked(prefs.solidTimetableColor());
         morningTimeInput.setText(prefs.morningTime());
         for (int i = 0; i < 8; i++) periodInputs[i].setText(prefs.periodTime(i + 1));
         neisKeyInput.setText(prefs.neisApiKey());

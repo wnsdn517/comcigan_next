@@ -1,29 +1,26 @@
 # 컴시간알리미+ 소스코드
 
 ## 구조
-- `src/dev/rocky/comcitime/` — 자바 소스 12개 파일
-- `res/xml/network_security_config.xml` — comci.kr 평문 HTTP 허용 설정
-- `AndroidManifest.xml` — 앱 매니페스트
+표준 Gradle Android 프로젝트입니다.
+- `app/src/main/java/dev/rocky/comcitime/` — 자바 소스
+- `app/src/main/res/` — 리소스 (앱 아이콘, 네트워크 보안 설정 등)
+- `app/src/main/AndroidManifest.xml` — 앱 매니페스트
+- `app/build.gradle`, `build.gradle`, `settings.gradle` — Gradle 빌드 설정
 
-## 참고: Gradle 프로젝트가 아닙니다
-이 코드는 Android Studio용 Gradle 프로젝트가 아니라, `javac` + `d8` + `aapt2`를 직접 호출해서
-빌드한 것입니다 (Gradle 없이). 그대로 Android Studio에 열면 인식이 안 됩니다.
+## Android Studio에서 열기
+저장소를 그대로 Android Studio에서 "Open"으로 열면 바로 인식됩니다. Gradle 동기화가
+끝나면 `Run`으로 바로 실행할 수 있습니다.
 
-**Android Studio에서 쓰시려면**: 새 프로젝트(Empty Views Activity, Java) 만드신 다음,
-1. `src/dev/rocky/comcitime/*.java` 전부를 `app/src/main/java/dev/rocky/comcitime/`에 복사
-2. `res/xml/network_security_config.xml`을 `app/src/main/res/xml/`에 복사
-3. `AndroidManifest.xml` 내용을 `app/src/main/AndroidManifest.xml`에 병합 (패키지명, 권한, 액티비티/리시버/서비스 등록, `networkSecurityConfig` 속성 참고)
-4. `minSdkVersion 26` 이상으로 설정
-
-## 직접 빌드하시려면 (Gradle 없이, 지금까지 쓴 방식)
-Android SDK의 `aapt2`, `d8`(또는 r8.jar), `apksigner`, 그리고 `android.jar`가 필요합니다.
-대략적인 순서:
+## 커맨드라인 빌드
 ```
-javac -cp android.jar -d out/classes src/dev/rocky/comcitime/*.java
-d8 --release --min-api 26 --lib android.jar --output out/dex out/classes/dev/rocky/comcitime/*.class
-aapt2 link -o base.apk -I android.jar --manifest AndroidManifest.xml -R res-compiled/*.flat --min-sdk-version 26 --target-sdk-version 34
-# base.apk에 classes.dex 추가 후 apksigner로 서명
+./gradlew assembleDebug
 ```
+결과 APK는 `app/build/outputs/apk/debug/app-debug.apk` 에 생성됩니다.
+
+## 자동 빌드 (GitHub Actions)
+`.github/workflows/android-build.yml` 워크플로우가 `main` 브랜치 푸시, PR, 수동 실행
+(`workflow_dispatch`)마다 디버그 APK를 빌드해서 Actions 실행 결과의 Artifacts에
+`comcitime-debug-apk`로 올려줍니다.
 
 ## 핵심 파일 요약
 - `ComciganApi.java` — comci.kr 비공식 API 클라이언트 (쿼리 인코딩, 학교검색, 시간표조회)

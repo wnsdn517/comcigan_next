@@ -28,12 +28,21 @@ public class LiveNotifyService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-        startForeground(NotificationHelper.ID_LIVE, NotificationHelper.buildLive(this, "컴시간알리미", "불러오는 중..."));
         handler.post(tick);
     }
 
+    // Every Context.startForegroundService() call -- not just the one that
+    // creates the service -- comes with its own promise to call
+    // startForeground() before the system's timeout, even if the service
+    // instance is already running and onCreate() already handled it once.
+    // Skipping this in onStartCommand() is what caused
+    // ForegroundServiceDidNotStartInTimeException on a second start
+    // (e.g. re-toggling a notification setting while Live Notify was
+    // already on). Calling it again here is safe/idempotent.
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        startForeground(NotificationHelper.ID_LIVE, NotificationHelper.buildLive(this, "컴시간알리미", "불러오는 중..."));
+        refresh();
         return START_STICKY;
     }
 
