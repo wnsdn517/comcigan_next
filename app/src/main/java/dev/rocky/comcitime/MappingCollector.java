@@ -142,14 +142,31 @@ public class MappingCollector {
     private java.util.Map<String, Integer> lastScanRssi = new java.util.HashMap<>();
 
     // ---- lower-priority raw signals (see class doc): latest value only,
-    // plus a rolling history buffer per signal for the debug graphs.
-    private float accelMag = 0f, gyroMag = 0f, magFieldUt = 0f, pressureHpa = 0f, refPressureHpa = 0f;
+    // plus a rolling per-axis history buffer per signal for the debug
+    // graphs, so accelerometer/gyroscope/magnetometer are shown as their
+    // actual X/Y/Z components rather than collapsed into one magnitude
+    // number (accelMag below is kept separately since Weinberg's formula
+    // in estimateStepLength() genuinely needs the magnitude, not an axis).
+    private float accelMag = 0f;
+    private float accelX, accelY, accelZ, gyroX, gyroY, gyroZ, magX, magY, magZ;
+    private float pressureHpa = 0f, refPressureHpa = 0f;
     private int lastTopRssi = -120;
     private int screenRotationDeg = -1;
     private double lastLat = Double.NaN, lastLon = Double.NaN;
-    private final float[] accelHistory = new float[RAW_HISTORY_SIZE];
-    private final float[] gyroHistory = new float[RAW_HISTORY_SIZE];
-    private final float[] magHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] accelXHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] accelYHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] accelZHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] gyroXHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] gyroYHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] gyroZHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] magXHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] magYHistory = new float[RAW_HISTORY_SIZE];
+    private final float[] magZHistory = new float[RAW_HISTORY_SIZE];
+    // Separate from all of the above: the gyro-only integrated heading
+    // over time (see gyroYawDeg/HEADING_COMPASS_PULL), so a walked test
+    // loop's drift is directly visible as a trend line instead of only
+    // inferred from the path drawing.
+    private final float[] gyroYawHistory = new float[RAW_HISTORY_SIZE];
     private final float[] pressureHistory = new float[RAW_HISTORY_SIZE];
     private final float[] rssiHistory = new float[RAW_HISTORY_SIZE];
     private int historyCount = 0;
@@ -219,24 +236,25 @@ public class MappingCollector {
                     recordMotionSample();
                     break;
                 case Sensor.TYPE_ACCELEROMETER:
+                    accelX = event.values[0]; accelY = event.values[1]; accelZ = event.values[2];
                     accelMag = vectorMag(event.values);
                     accelMinInStep = Math.min(accelMinInStep, accelMag);
                     accelMaxInStep = Math.max(accelMaxInStep, accelMag);
                     break;
                 case Sensor.TYPE_GYROSCOPE:
-                    gyroMag = vectorMag(event.values);
+                    gyroX = event.values[0]; gyroY = event.values[1]; gyroZ = event.values[2];
                     if (lastGyroTimestampNs != 0 && !Double.isNaN(gyroYawDeg)) {
                         double dt = (event.timestamp - lastGyroTimestampNs) / 1_000_000_000.0;
                         // z-axis angular rate approximates yaw rate while the
                         // phone is held roughly upright, consistent with the
                         // rest of this class's simplifications.
-                        double dYaw = Math.toDegrees(event.values[2]) * dt;
+                        double dYaw = Math.toDegrees(gyroZ) * dt;
                         gyroYawDeg = ((gyroYawDeg + dYaw) % 360 + 360) % 360;
                     }
                     lastGyroTimestampNs = event.timestamp;
                     break;
                 case Sensor.TYPE_MAGNETIC_FIELD:
-                    magFieldUt = vectorMag(event.values);
+                    magX = event.values[0]; magY = event.values[1]; magZ = event.values[2];
                     break;
                 case Sensor.TYPE_PRESSURE:
                     pressureHpa = event.values[0];
@@ -306,9 +324,6 @@ public class MappingCollector {
     public double getPosX() { return posX; }
     public double getPosY() { return posY; }
 
-    public float getAccelMag() { return accelMag; }
-    public float getGyroMag() { return gyroMag; }
-    public float getMagFieldUt() { return magFieldUt; }
     public float getPressureHpa() { return pressureHpa; }
     public int getLastTopRssi() { return lastTopRssi; }
     public int getScreenRotationDeg() { return screenRotationDeg; }
@@ -325,19 +340,33 @@ public class MappingCollector {
     }
 
     public int getHistoryCount() { return historyCount; }
-    public float[] getAccelHistory() { return accelHistory; }
-    public float[] getGyroHistory() { return gyroHistory; }
-    public float[] getMagHistory() { return magHistory; }
+    public float[] getAccelXHistory() { return accelXHistory; }
+    public float[] getAccelYHistory() { return accelYHistory; }
+    public float[] getAccelZHistory() { return accelZHistory; }
+    public float[] getGyroXHistory() { return gyroXHistory; }
+    public float[] getGyroYHistory() { return gyroYHistory; }
+    public float[] getGyroZHistory() { return gyroZHistory; }
+    public float[] getMagXHistory() { return magXHistory; }
+    public float[] getMagYHistory() { return magYHistory; }
+    public float[] getMagZHistory() { return magZHistory; }
+    public float[] getGyroYawHistory() { return gyroYawHistory; }
     public float[] getPressureHistory() { return pressureHistory; }
     public float[] getRssiHistory() { return rssiHistory; }
 
-    // Called once/sec from the Settings UI tick (only while that section
-    // is visible) to snapshot the current raw values into the rolling
-    // history buffers the debug graphs read from.
+    // Called every MainActivity.MAPPING_TICK_MS from the Settings UI tick
+    // (only while that section is visible) to snapshot the current raw
+    // values into the rolling history buffers the debug graphs read from.
     public void pushRawHistorySample() {
-        shiftAndSet(accelHistory, accelMag);
-        shiftAndSet(gyroHistory, gyroMag);
-        shiftAndSet(magHistory, magFieldUt);
+        shiftAndSet(accelXHistory, accelX);
+        shiftAndSet(accelYHistory, accelY);
+        shiftAndSet(accelZHistory, accelZ);
+        shiftAndSet(gyroXHistory, gyroX);
+        shiftAndSet(gyroYHistory, gyroY);
+        shiftAndSet(gyroZHistory, gyroZ);
+        shiftAndSet(magXHistory, magX);
+        shiftAndSet(magYHistory, magY);
+        shiftAndSet(magZHistory, magZ);
+        shiftAndSet(gyroYawHistory, Double.isNaN(gyroYawDeg) ? 0f : (float) gyroYawDeg);
         shiftAndSet(pressureHistory, pressureHpa);
         shiftAndSet(rssiHistory, lastTopRssi);
         if (historyCount < RAW_HISTORY_SIZE) historyCount++;

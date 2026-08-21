@@ -84,7 +84,7 @@ public class MainActivity extends Activity {
     private EditText mappingFloorInput, mappingLabelInput;
     private OrientationGizmoView mappingGizmoView;
     private MappingPathView mappingPathView;
-    private SparklineView accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph;
+    private SparklineView accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph, gyroYawGraph;
     private Runnable pendingMappingStart;
     private static final int REQ_MAPPING_PERMS = 2;
     private final Handler mappingTickHandler = new Handler();
@@ -1704,18 +1704,35 @@ public class MainActivity extends Activity {
         section.addView(pathCard, cardLp());
 
         LinearLayout rawCard = card();
-        rawCard.addView(eyebrow("실제 원시 센서 데이터 (변화 그래프)"));
-        accelGraph = new SparklineView(this, "🚶 가속도계", " m/s²", 0xFF5B8CFF);
-        gyroGraph = new SparklineView(this, "🧭 자이로스코프", " rad/s", 0xFFFF7A7A);
-        magGraph = new SparklineView(this, "🧭 자기장 센서", " μT", 0xFF57C785);
-        pressureGraph = new SparklineView(this, "📏 기압계", " hPa", 0xFFF2B94C);
-        rssiGraph = new SparklineView(this, "📶 Wi-Fi 최강 신호", " dBm", 0xFFB57BFF);
+        rawCard.addView(eyebrow("실제 원시 센서 데이터 (축별 변화 그래프)"));
+        TextView rawLegend = new TextView(this);
+        rawLegend.setText("X 빨강 · Y 초록 · Z 파랑");
+        UiKit.styleCaption(rawLegend);
+        rawCard.addView(rawLegend);
+        accelGraph = new SparklineView(this, "🚶 가속도계", " m/s²");
+        gyroGraph = new SparklineView(this, "🧭 자이로스코프", " rad/s");
+        magGraph = new SparklineView(this, "🧭 자기장 센서", " μT");
+        pressureGraph = new SparklineView(this, "📏 기압계", " hPa");
+        rssiGraph = new SparklineView(this, "📶 Wi-Fi 최강 신호", " dBm");
         for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph}) {
             LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
             glp.topMargin = dp(6);
             rawCard.addView(gv, glp);
         }
         section.addView(rawCard, cardLp());
+
+        LinearLayout gyroYawCard = card();
+        gyroYawCard.addView(eyebrow("자이로 적분 방향 (보폭 계산과 별개)"));
+        TextView gyroYawHint = new TextView(this);
+        gyroYawHint.setText("나침반 보정 없이 자이로스코프만으로 적분한 방향이에요. 크게 튀거나 계속 한쪽으로 쏠리면 드리프트가 커지고 있다는 뜻이에요.");
+        UiKit.styleCaption(gyroYawHint);
+        gyroYawHint.setPadding(0, dp(2), 0, 0);
+        gyroYawCard.addView(gyroYawHint);
+        gyroYawGraph = new SparklineView(this, "🧭 자이로 전용 방향", "°");
+        LinearLayout.LayoutParams gyroYawLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
+        gyroYawLp.topMargin = dp(8);
+        gyroYawCard.addView(gyroYawGraph, gyroYawLp);
+        section.addView(gyroYawCard, cardLp());
 
         LinearLayout strideCard = card();
         strideCard.addView(eyebrow("원점 기준 이동 거리 계산"));
@@ -1867,8 +1884,8 @@ public class MainActivity extends Activity {
             mappingSensorText.setText("수집 중이 아니에요.");
             if (mappingStrideText != null) mappingStrideText.setText("");
             if (mappingGizmoView != null) mappingGizmoView.setOrientation(0, 0, 0);
-            for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph}) {
-                if (gv != null) gv.setData(new float[0], 0);
+            for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph, gyroYawGraph}) {
+                if (gv != null) gv.setSeries(new ArrayList<>(), 0);
             }
             return;
         }
@@ -1896,11 +1913,25 @@ public class MainActivity extends Activity {
 
         running.pushRawHistorySample();
         int histCount = running.getHistoryCount();
-        if (accelGraph != null) accelGraph.setData(running.getAccelHistory(), histCount);
-        if (gyroGraph != null) gyroGraph.setData(running.getGyroHistory(), histCount);
-        if (magGraph != null) magGraph.setData(running.getMagHistory(), histCount);
-        if (pressureGraph != null) pressureGraph.setData(running.getPressureHistory(), histCount);
-        if (rssiGraph != null) rssiGraph.setData(running.getRssiHistory(), histCount);
+        final int RED = 0xFFFF7A7A, GREEN = 0xFF57C785, BLUE = 0xFF5B8CFF;
+        if (accelGraph != null) accelGraph.setSeries(java.util.Arrays.asList(
+                new SparklineView.Series(running.getAccelXHistory(), RED, "X"),
+                new SparklineView.Series(running.getAccelYHistory(), GREEN, "Y"),
+                new SparklineView.Series(running.getAccelZHistory(), BLUE, "Z")), histCount);
+        if (gyroGraph != null) gyroGraph.setSeries(java.util.Arrays.asList(
+                new SparklineView.Series(running.getGyroXHistory(), RED, "X"),
+                new SparklineView.Series(running.getGyroYHistory(), GREEN, "Y"),
+                new SparklineView.Series(running.getGyroZHistory(), BLUE, "Z")), histCount);
+        if (magGraph != null) magGraph.setSeries(java.util.Arrays.asList(
+                new SparklineView.Series(running.getMagXHistory(), RED, "X"),
+                new SparklineView.Series(running.getMagYHistory(), GREEN, "Y"),
+                new SparklineView.Series(running.getMagZHistory(), BLUE, "Z")), histCount);
+        if (pressureGraph != null) pressureGraph.setSeries(java.util.Collections.singletonList(
+                new SparklineView.Series(running.getPressureHistory(), 0xFFF2B94C, null)), histCount);
+        if (rssiGraph != null) rssiGraph.setSeries(java.util.Collections.singletonList(
+                new SparklineView.Series(running.getRssiHistory(), 0xFFB57BFF, null)), histCount);
+        if (gyroYawGraph != null) gyroYawGraph.setSeries(java.util.Collections.singletonList(
+                new SparklineView.Series(running.getGyroYawHistory(), 0xFF4CD3C2, null)), histCount);
     }
 
     // Shows each Wi-Fi access point's estimated position (RSSI-weighted
