@@ -1845,9 +1845,9 @@ public class MainActivity extends Activity {
                 : String.format(Locale.KOREA, "%.5f, %.5f", running.getLastLat(), running.getLastLon());
         mappingSensorText.setText(String.format(Locale.KOREA,
                 "방위(heading) %.0f°  기울기(pitch) %.0f°  좌우기울기(roll) %.0f°\n" +
-                        "걸음 수 %d  위치 (%.1f, %.1f) m  원점에서 %.1fm\n" +
+                        "걸음 수 %d  위치 (%.1f, %.1f) m ±%.1fm  원점에서 %.1fm\n" +
                         "추정 층 변화 %+d층  화면 방향 %d°  GPS %s",
-                heading, pitch, roll, steps, x, y, dist,
+                heading, pitch, roll, steps, x, y, running.getPositionUncertaintyM(), dist,
                 running.getEstimatedFloorDelta(), running.getScreenRotationDeg(), gps));
         if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
         if (mappingPathView != null) {

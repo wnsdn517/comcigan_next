@@ -220,7 +220,11 @@ public class MappingDb extends SQLiteOpenHelper {
     // per BSSID present in one scan but not the other; the result is the
     // inverse-distance-weighted average position of the closest k matches.
     // Returns null when there's nothing to compare against yet, or the
-    // live scan shares no BSSID with any recorded fingerprint.
+    // live scan shares no BSSID with any recorded fingerprint. Result is
+    // {x, y, avgMatchDistance} -- the third value is how far (in RSSI-space)
+    // the k nearest matches were, so a caller fusing this into a Kalman
+    // filter can size the measurement's uncertainty by it (see
+    // MappingCollector.applyFingerprintCorrection()).
     public double[] estimateLocationFromFingerprint(java.util.Map<String, Integer> liveRssi, int k) {
         if (liveRssi == null || liveRssi.isEmpty()) return null;
         List<Fingerprint> all = allFingerprints();
@@ -247,15 +251,16 @@ public class MappingDb extends SQLiteOpenHelper {
 
         scored.sort((a, b) -> Double.compare(a[0], b[0]));
         int n = Math.min(k, scored.size());
-        double wSum = 0, wx = 0, wy = 0;
+        double wSum = 0, wx = 0, wy = 0, distSum = 0;
         for (int i = 0; i < n; i++) {
             double[] s = scored.get(i);
             double w = 1.0 / (s[0] + 1.0); // +1 avoids div-by-zero on an exact match
             wSum += w;
             wx += w * s[1];
             wy += w * s[2];
+            distSum += s[0];
         }
-        return new double[]{wx / wSum, wy / wSum};
+        return new double[]{wx / wSum, wy / wSum, distSum / n};
     }
 
     // Chronological (x, y) trail from the most recent motion samples, for

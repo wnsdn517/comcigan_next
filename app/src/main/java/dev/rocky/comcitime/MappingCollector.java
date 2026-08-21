@@ -54,11 +54,16 @@ import java.util.concurrent.Executors;
 // metrically perfect: every Wi-Fi scan is tagged with the position dead
 // reckoning reports at that instant, building a fingerprint map (see
 // MappingDb.estimateLocationFromFingerprint) that later scans get matched
-// against -- and each time a scan finds a confident fingerprint match,
-// the position is nudged toward it (see recordScanResults()), a simple
-// complementary-filter fusion that pulls accumulated drift back in line
-// without needing a full Kalman/particle filter for this experimental
-// scope.
+// against, and each match corrects accumulated dead-reckoning drift via a
+// small per-axis Kalman filter (see applyFingerprintCorrection()): each
+// step's dead reckoning is the process model (adding STEP_PROCESS_NOISE
+// uncertainty), each fingerprint match is a measurement whose uncertainty
+// scales with how far (in RSSI-space) its nearest neighbors were. This
+// mirrors the WiFi-kNN + Kalman-smoothing approach used by published
+// Android indoor/outdoor positioning systems (e.g. the ESRI Cup-winning
+// "In-outdoorSeamlessPositioningNavigationSystem" project), scaled down to
+// one filter dimension per axis instead of a full multi-sensor state
+// vector, which is enough for this experimental single-building scope.
 public class MappingCollector {
 
     public interface Listener {
@@ -115,6 +120,13 @@ public class MappingCollector {
     private float accelMinInStep = Float.MAX_VALUE, accelMaxInStep = -Float.MAX_VALUE;
     private double lastStepLengthM = 0.7;
     private static final double STEP_LENGTH_K = 0.5; // Weinberg's empirical constant
+
+    // Per-axis position uncertainty (variance, m^2) for the Kalman filter
+    // described in the class doc. Starts moderately uncertain (~1m stdev);
+    // resetOrigin() drops it near zero since a manual reset asserts a
+    // known ground-truth point.
+    private double posVarX = 1.0, posVarY = 1.0;
+    private static final double STEP_PROCESS_NOISE = 0.05 * 0.05; // m^2 added per step
 
     // Last Wi-Fi scan's {bssid: rssi}, used both to persist the scan and
     // to match it against the fingerprint map for the drift correction
@@ -177,6 +189,8 @@ public class MappingCollector {
                     double rad = Math.toRadians(dirDeg);
                     posX += stepLen * Math.sin(rad);
                     posY += stepLen * Math.cos(rad);
+                    posVarX += STEP_PROCESS_NOISE;
+                    posVarY += STEP_PROCESS_NOISE;
                     lastStepLengthM = stepLen;
                     accelMinInStep = Float.MAX_VALUE;
                     accelMaxInStep = -Float.MAX_VALUE;
@@ -312,6 +326,29 @@ public class MappingCollector {
     public void resetOrigin() {
         posX = 0;
         posY = 0;
+        posVarX = 0.01;
+        posVarY = 0.01;
+    }
+
+    // Rough position uncertainty (meters, one standard deviation) from the
+    // Kalman filter's current variance, for display -- lets Settings show
+    // that this is an estimate with a real error bound, not an exact fix.
+    public double getPositionUncertaintyM() {
+        return Math.sqrt((posVarX + posVarY) / 2);
+    }
+
+    // Kalman measurement update: a Wi-Fi fingerprint match is a noisy
+    // position measurement whose variance (r) scales with how far its
+    // nearest neighbors were in RSSI-space (a tight cluster of close
+    // matches is trusted far more than a vague one). See class doc.
+    private void applyFingerprintCorrection(double mx, double my, double matchDistance) {
+        double r = Math.max(0.25, Math.min(25.0, matchDistance * matchDistance * 0.02));
+        double kx = posVarX / (posVarX + r);
+        double ky = posVarY / (posVarY + r);
+        posX += kx * (mx - posX);
+        posY += ky * (my - posY);
+        posVarX *= (1 - kx);
+        posVarY *= (1 - ky);
     }
 
     public void start() {
@@ -322,6 +359,8 @@ public class MappingCollector {
         posY = 0;
         refPressureHpa = 0f;
         historyCount = 0;
+        posVarX = 1.0;
+        posVarY = 1.0;
         gyroYawDeg = Double.NaN;
         lastGyroTimestampNs = 0;
         accelMinInStep = Float.MAX_VALUE;
@@ -443,17 +482,14 @@ public class MappingCollector {
             for (ScanResult r : results) {
                 db.insertRadioScan(sid, ts, r.BSSID, r.level, r.frequency, x, y);
             }
-            // Complementary-filter fusion (see class doc): a confident
-            // fingerprint match nudges the dead-reckoned position back
-            // toward it, so accumulated gyro/step drift gets corrected by
-            // every fresh scan instead of only ever growing.
+            // Kalman fusion (see class doc): a fingerprint match is fed in
+            // as a measurement, weighted by both the filter's current
+            // uncertainty and the match's own confidence, so accumulated
+            // gyro/step drift gets corrected by every fresh scan instead
+            // of only ever growing.
             double[] match = db.estimateLocationFromFingerprint(rssiByBssid, 5);
             if (match != null) {
-                handler.post(() -> {
-                    double blend = 0.25;
-                    posX = posX * (1 - blend) + match[0] * blend;
-                    posY = posY * (1 - blend) + match[1] * blend;
-                });
+                handler.post(() -> applyFingerprintCorrection(match[0], match[1], match[2]));
             }
         });
         if (listener != null) listener.onScanCount(results.size());
