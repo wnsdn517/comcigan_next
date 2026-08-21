@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- card body -->
+    <path
+        android:pathData="M36,28 L72,28 A8,8 0 0 1 80,36 L80,72 A8,8 0 0 1 72,80 L36,80 A8,8 0 0 1 28,72 L28,36 A8,8 0 0 1 36,28 Z"
+        android:fillColor="#262A36" />
+    <!-- header strip -->
+    <path
+        android:pathData="M36,28 L72,28 A8,8 0 0 1 80,36 L80,42 L28,42 L28,36 A8,8 0 0 1 36,28 Z"
+        android:fillColor="#F2B94C" />
+    <!-- grid rows -->
+    <path
+        android:pathData="M34,50 L74,50 L74,58 L34,58 Z"
+        android:fillColor="#2E3341" />
+    <path
+        android:pathData="M34,64 L74,64 L74,72 L34,72 Z"
+        android:fillColor="#2E3341" />
+    <!-- highlighted cell -->
+    <path
+        android:pathData="M56,50 L74,50 L74,58 L56,58 Z"
+        android:fillColor="#F2B94C" />
+</vector>

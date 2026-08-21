@@ -1,0 +1,48 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Release signing: if a keystore is provided via environment variables
+// (e.g. from CI secrets), the release build is signed with it. Otherwise
+// it falls back to AGP's auto-generated debug keystore so the release
+// build is ALWAYS signed and installable -- an unsigned APK can't be
+// installed on a real device at all (Android rejects it outright), which
+// is exactly what was happening before this fallback existed.
+def releaseKeystorePath = System.getenv('RELEASE_KEYSTORE_FILE')
+def hasReleaseSigning = releaseKeystorePath != null && file(releaseKeystorePath).exists()
+
+android {
+    namespace 'dev.rocky.comcitime'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'dev.rocky.comcitime'
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    if (hasReleaseSigning) {
+        signingConfigs {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword System.getenv('RELEASE_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('RELEASE_KEY_ALIAS')
+                keyPassword System.getenv('RELEASE_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

@@ -17,7 +17,6 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.animation.OvershootInterpolator;
 import android.widget.ArrayAdapter;
 import android.widget.AutoCompleteTextView;
 import android.widget.Button;
@@ -44,6 +43,7 @@ public class MainActivity extends Activity {
     private LinearLayout[] pages;
     private Button[] tabButtons;
     private static final String[] TAB_NAMES = {"시간표", "급식", "설정"};
+    private static final String[] TAB_ICONS = {"📅", "🍱", "⚙️"};
 
     private TextView classHeaderLabel;
     private TextView teacherModeIndicator;
@@ -55,6 +55,7 @@ public class MainActivity extends Activity {
     private final List<WeekSection> weekSections = new ArrayList<>();
     private final Handler nowPanelHandler = new Handler();
     private Button prevWeekBtn;
+    private int loadGeneration = 0;
 
     private static class WeekSection {
         Timetable tt;
@@ -70,6 +71,7 @@ public class MainActivity extends Activity {
     private LinearLayout colorsList;
     private String pendingSchoolCode = "", pendingSchoolName = "";
     private CheckBox notifyChangeCheck, notifyPeriodCheck, notifyMorningCheck, liveNotifyCheck;
+    private CheckBox solidColorCheck;
     private EditText morningTimeInput;
     private EditText[] periodInputs = new EditText[8];
     private EditText neisKeyInput;
@@ -77,10 +79,13 @@ public class MainActivity extends Activity {
     private TextView mealStatusText;
     private LinearLayout mealContent;
 
+    private MappingCollector mappingCollector;
+    private TextView mappingStatusText, mappingCountsText;
+    private EditText mappingFloorInput, mappingLabelInput;
+    private Runnable pendingMappingStart;
+    private static final int REQ_MAPPING_PERMS = 2;
+
     private FrameLayout onboardingOverlay;
-    private FrameLayout teacherPreviewOverlay;
-    private LinearLayout teacherPreviewContent;
-    private TextView teacherPreviewTitle;
 
     private static final String[] DOW_SHORT = {"", "월", "화", "수", "목", "금"};
 
@@ -90,6 +95,20 @@ public class MainActivity extends Activity {
         UiKit.init(this);
         prefs = new Prefs(this);
         NotificationHelper.ensureChannels(this);
+        mappingCollector = new MappingCollector(this);
+        mappingCollector.setListener(new MappingCollector.Listener() {
+            @Override
+            public void onScanCount(int count) {
+                refreshMappingStatus();
+            }
+
+            @Override
+            public void onHeadingSteps(float headingDeg, int steps) {
+                if (mappingStatusText != null) {
+                    mappingStatusText.setText("켜짐 · " + steps + "걸음 · 방향 " + Math.round(headingDeg) + "°");
+                }
+            }
+        });
 
         FrameLayout rootFrame = new FrameLayout(this);
         rootFrame.setBackgroundColor(UiKit.BG);
@@ -106,14 +125,13 @@ public class MainActivity extends Activity {
         outerCol.addView(buildBottomNav());
 
         rootFrame.addView(outerCol, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        rootFrame.addView(buildTeacherPreviewOverlay(), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         rootFrame.addView(buildOnboardingOverlay(), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         setContentView(rootFrame);
         loadPrefsIntoUi();
         showPage(prefs.schoolCode().isEmpty() ? 2 : 0);
 
-        if (prefs.onboardingDone()) {
+        if (prefs.onboardingDone() && prefs.mappingConsentDone()) {
             onboardingOverlay.setVisibility(View.GONE);
             requestNotifPermissionIfNeeded();
         }
@@ -127,6 +145,45 @@ public class MainActivity extends Activity {
         }
     }
 
+    // Location is required to read Wi-Fi scan results, and on API 29+ step
+    // detection needs activity-recognition -- both only asked for at the
+    // moment the user actually starts a mapping session, not up front.
+    private void requestMappingPermissionsIfNeeded(Runnable onGranted) {
+        List<String> needed = new ArrayList<>();
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+        if (Build.VERSION.SDK_INT >= 29 && checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.ACTIVITY_RECOGNITION);
+        }
+        if (needed.isEmpty()) {
+            onGranted.run();
+            return;
+        }
+        pendingMappingStart = onGranted;
+        requestPermissions(needed.toArray(new String[0]), REQ_MAPPING_PERMS);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_MAPPING_PERMS) return;
+        boolean allGranted = grantResults.length > 0;
+        for (int r : grantResults) if (r != PackageManager.PERMISSION_GRANTED) allGranted = false;
+        if (allGranted && pendingMappingStart != null) {
+            pendingMappingStart.run();
+        } else {
+            Toast.makeText(this, "위치/동작 권한을 허용해야 지도 데이터를 수집할 수 있어요.", Toast.LENGTH_SHORT).show();
+        }
+        pendingMappingStart = null;
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (mappingCollector != null) mappingCollector.stop();
+    }
+
     private LinearLayout buildBottomNav() {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.HORIZONTAL);
@@ -136,31 +193,42 @@ public class MainActivity extends Activity {
         tabButtons = new Button[TAB_NAMES.length];
         for (int i = 0; i < TAB_NAMES.length; i++) {
             Button b = new Button(this);
-            b.setText(TAB_NAMES[i]);
+            b.setText(TAB_ICONS[i] + "  " + TAB_NAMES[i]);
             b.setTextSize(13);
             b.setAllCaps(false);
             b.setElevation(0);
             b.setStateListAnimator(null);
             b.setBackground(null);
+            b.setPadding(dp(4), dp(8), dp(4), dp(8));
             final int idx = i;
             b.setOnClickListener(v -> { UiKit.popIn(v); showPage(idx); });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.setMargins(dp(3), 0, dp(3), 0);
             wrap.addView(b, lp);
             tabButtons[i] = b;
         }
         return wrap;
     }
 
+    private GradientDrawable activeTabBg() {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(blend(UiKit.ACCENT, UiKit.SURFACE, 0.16f));
+        d.setCornerRadius(dp(999));
+        return d;
+    }
+
     private void showPage(int index) {
         for (int i = 0; i < pages.length; i++) {
             pages[i].setVisibility(i == index ? View.VISIBLE : View.GONE);
-            tabButtons[i].setTextColor(i == index ? UiKit.ACCENT : UiKit.TEXT_SECONDARY);
-            tabButtons[i].setTypeface(i == index ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            boolean active = i == index;
+            tabButtons[i].setTextColor(active ? UiKit.ACCENT : UiKit.TEXT_SECONDARY);
+            tabButtons[i].setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            tabButtons[i].setBackground(active ? activeTabBg() : null);
         }
         nowPanelHandler.removeCallbacksAndMessages(null);
         if (index == 0) { loadAllWeeks(); tickNowPanel(); }
         if (index == 1) refreshMeal();
-        if (index == 2) refreshColorsList();
+        if (index == 2) { refreshColorsList(); refreshMappingStatus(); }
     }
 
     private FrameLayout buildOnboardingOverlay() {
@@ -186,8 +254,24 @@ public class MainActivity extends Activity {
         infoCard.addView(onboardingLine("급식 정보(선택)", "설정 탭에서 NEIS 공개 API 키를 직접 입력하시면 급식 정보도 볼 수 있어요."));
         root.addView(infoCard, cardLp());
 
+        TextView permTitle = new TextView(this);
+        permTitle.setText("필요한 권한");
+        permTitle.setTextColor(UiKit.TEXT_PRIMARY);
+        permTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        permTitle.setTextSize(15);
+        permTitle.setPadding(dp(2), dp(4), 0, dp(8));
+        root.addView(permTitle);
+
+        LinearLayout permCard = card();
+        permCard.addView(onboardingLine("알림", "시간표 변동, 쉬는시간, 아침 시간표 알림을 보내려면 필요해요. 다음 화면에서 허용을 눌러주세요."));
+        permCard.addView(onboardingLine("정확한 알람", "설정하신 시각에 알림이 오차 없이 정확히 오도록 사용해요."));
+        permCard.addView(onboardingLine("기기 재시작 시 실행", "기기를 껐다 켜도 예약해둔 알림이 계속 동작하도록 사용해요."));
+        permCard.addView(onboardingLine("포그라운드 서비스 (Live Notify)", "설정에서 Live Notify를 켜면, 지금 몇 교시인지 상단바에 계속 표시하기 위해 사용해요. 끄면 사용하지 않아요."));
+        permCard.addView(onboardingLine("위치/동작 (실내 지도 제작, 실험 기능)", "설정의 \"실내 지도 만들기\"를 직접 시작했을 때만, 학교 실내 위치 지도를 만들기 위해 Wi-Fi 신호 세기와 걸음/방향 정보를 수집해요. 이 정보는 특정 인물과 연결되지 않는 익명 데이터이고, 서버로 보내지 않고 이 기기에만 저장돼요."));
+        root.addView(permCard, cardLp());
+
         CheckBox agree = new CheckBox(this);
-        agree.setText("위 내용에 동의하고 시작할게요");
+        agree.setText("위 내용과 권한 사용에 동의하고 시작할게요");
         agree.setTextColor(UiKit.TEXT_PRIMARY);
         root.addView(agree);
 
@@ -206,6 +290,7 @@ public class MainActivity extends Activity {
         });
         startBtn.setOnClickListener(v -> {
             prefs.setOnboardingDone(true);
+            prefs.setMappingConsentDone(true);
             onboardingOverlay.setVisibility(View.GONE);
             requestNotifPermissionIfNeeded();
         });
@@ -272,7 +357,7 @@ public class MainActivity extends Activity {
         root.addView(headerRow);
 
         TextView hint = new TextView(this);
-        hint.setText("길게 눌러 위로 밀면 선생님 시간표 고정 · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
+        hint.setText("길게 눌러 선생님 시간표 보기 (위로 밀면 고정) · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
         hint.setTextColor(UiKit.TEXT_SECONDARY);
         hint.setTextSize(11);
         hint.setPadding(dp(20), 0, dp(20), dp(10));
@@ -322,36 +407,65 @@ public class MainActivity extends Activity {
         int dow = mondayBasedDow();
         if (dow == 0) { nowPanel.setVisibility(View.GONE); return; }
 
-        Timetable.PeriodEntry current = null;
         Timetable tt = weekSections.get(0).tt;
         List<Timetable.PeriodEntry> today = tt.getDaySchedule(prefs.grade(), prefs.classNum(), dow);
         Calendar now = Calendar.getInstance();
         int nowMinutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE);
+
+        Timetable.PeriodEntry current = null;
+        Timetable.PeriodEntry next = null;
+        int nextStart = Integer.MAX_VALUE;
+        int currentEnd = -1;
+        Integer dayStart = null, dayEnd = null;
         for (Timetable.PeriodEntry e : today) {
             Integer[] range = parsePeriodRange(prefs.periodTime(e.period));
             if (range == null) continue;
-            if (nowMinutes >= range[0] && nowMinutes < range[1]) { current = e; break; }
+            dayStart = dayStart == null ? range[0] : Math.min(dayStart, range[0]);
+            dayEnd = dayEnd == null ? range[1] : Math.max(dayEnd, range[1]);
+            if (nowMinutes >= range[0] && nowMinutes < range[1]) {
+                current = e;
+                currentEnd = range[1];
+            } else if (range[0] > nowMinutes && range[0] < nextStart) {
+                nextStart = range[0];
+                next = e;
+            }
         }
-        if (current == null) { nowPanel.setVisibility(View.GONE); return; }
 
+        if (current != null) {
+            renderNowPanelInClass(current, currentEnd - nowMinutes);
+        } else if (dayStart != null && nowMinutes >= dayStart && nowMinutes < dayEnd) {
+            renderNowPanelBreak(next, next != null ? nextStart - nowMinutes : -1);
+        } else {
+            nowPanel.setVisibility(View.GONE);
+        }
+    }
+
+    private String formatRemaining(int minutes) {
+        if (minutes < 0) minutes = 0;
+        if (minutes < 60) return minutes + "분";
+        return (minutes / 60) + "시간 " + (minutes % 60) + "분";
+    }
+
+    private void renderNowPanelInClass(Timetable.PeriodEntry current, int remainingMinutes) {
         nowPanel.removeAllViews();
         nowPanel.setVisibility(View.VISIBLE);
+        int subjColor = prefs.subjectColor(current.subject);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(blend(prefs.subjectColor(current.subject), UiKit.SURFACE, 0.35f));
+        bg.setColor(prefs.solidTimetableColor() ? UiKit.darken(prefs.solidBaseColor(), 0.55f) : blend(subjColor, UiKit.SURFACE, 0.35f));
         bg.setCornerRadius(dp(14));
         bg.setStroke(dp(2), UiKit.ACCENT);
         nowPanel.setBackground(bg);
         nowPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
 
         TextView live = new TextView(this);
-        live.setText("\ud83d\udd34 지금 " + current.period + "교시");
+        live.setText("🔴 지금 " + current.period + "교시 · " + formatRemaining(remainingMinutes) + " 남음");
         live.setTextColor(UiKit.ACCENT);
-        live.setTypeface(Typeface.DEFAULT_BOLD);
+        live.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         live.setTextSize(12);
         nowPanel.addView(live);
 
         TextView subj = new TextView(this);
-        subj.setText(current.subject + (current.teacher.isEmpty() ? "" : "  \u00b7  " + current.teacher));
+        subj.setText(current.subject + (current.teacher.isEmpty() ? "" : "  ·  " + current.teacher));
         subj.setTextColor(Color.WHITE);
         subj.setTextSize(18);
         subj.setTypeface(Typeface.DEFAULT_BOLD);
@@ -362,12 +476,42 @@ public class MainActivity extends Activity {
         Prefs.PersonalEvent ev = prefs.findPersonalEvent(today2, current.period);
         if (ev != null) {
             TextView evText = new TextView(this);
-            evText.setText("\ud83d\udcdd " + ev.text);
+            evText.setText("📝 " + ev.text);
             evText.setTextColor(0xDDFFFFFF);
             evText.setTextSize(12);
             evText.setPadding(0, dp(4), 0, 0);
             nowPanel.addView(evText);
         }
+    }
+
+    private void renderNowPanelBreak(Timetable.PeriodEntry next, int remainingMinutes) {
+        nowPanel.removeAllViews();
+        nowPanel.setVisibility(View.VISIBLE);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(UiKit.SURFACE_ALT);
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(1), UiKit.BORDER);
+        nowPanel.setBackground(bg);
+        nowPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
+
+        TextView live = new TextView(this);
+        live.setText(next != null ? "☕ 쉬는시간 · " + formatRemaining(remainingMinutes) + " 후 다음 수업" : "☕ 쉬는시간");
+        live.setTextColor(UiKit.TEXT_SECONDARY);
+        live.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        live.setTextSize(12);
+        nowPanel.addView(live);
+
+        TextView subj = new TextView(this);
+        if (next != null) {
+            subj.setText(next.period + "교시 " + next.subject + (next.teacher.isEmpty() ? "" : "  ·  " + next.teacher));
+        } else {
+            subj.setText("오늘 남은 수업이 없어요.");
+        }
+        subj.setTextColor(UiKit.TEXT_PRIMARY);
+        subj.setTextSize(16);
+        subj.setTypeface(Typeface.DEFAULT_BOLD);
+        subj.setPadding(0, dp(4), 0, 0);
+        nowPanel.addView(subj);
     }
 
     private Integer[] parsePeriodRange(String range) {
@@ -392,7 +536,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    // Guards against a race that used to crash with IndexOutOfBoundsException:
+    // if loadAllWeeks() is called again (e.g. quickly re-tapping the 시간표
+    // tab) while a previous fetch chain is still in flight, the OLD chain's
+    // callbacks would keep firing and add sections built against a
+    // weekSections.size() that no longer matched weekSectionsContainer's
+    // actual child count (the new call had already reset the container).
+    // Every callback below checks its captured generation against the
+    // current one and bails out silently if a newer load has superseded it.
     private void loadAllWeeks() {
+        int myGeneration = ++loadGeneration;
         if (prefs.schoolCode().isEmpty()) {
             classHeaderLabel.setText("학급을 설정해주세요 \u203a");
             weekSectionsContainer.removeAllViews();
@@ -411,6 +564,7 @@ public class MainActivity extends Activity {
         weekSectionsContainer.addView(loadingRow("시간표를 불러오는 중..."));
 
         TimetableRepository.fetch(this, "1", (tt, offline, err) -> {
+            if (myGeneration != loadGeneration) return;
             weekSectionsContainer.removeAllViews();
             if (tt == null) {
                 weekSectionsContainer.addView(errorRow("불러오지 못했어요: " + (err != null ? err.getMessage() : "")));
@@ -421,16 +575,18 @@ public class MainActivity extends Activity {
                 weeks = new ArrayList<>();
                 weeks.add(new Timetable.WeekOption("1", "이번 주"));
             }
-            loadWeeksSequentially(weeks, 0, offline);
+            loadWeeksSequentially(myGeneration, weeks, 0, offline);
         });
     }
 
-    private void loadWeeksSequentially(List<Timetable.WeekOption> weeks, int index, boolean firstOffline) {
+    private void loadWeeksSequentially(int generation, List<Timetable.WeekOption> weeks, int index, boolean firstOffline) {
+        if (generation != loadGeneration) return;
         if (index >= weeks.size()) { renderNowPanel(); return; }
         Timetable.WeekOption w = weeks.get(index);
         TimetableRepository.fetch(this, w.code, (tt, offline, err) -> {
+            if (generation != loadGeneration) return;
             if (tt != null) addWeekSection(tt, index, offline);
-            loadWeeksSequentially(weeks, index + 1, firstOffline);
+            loadWeeksSequentially(generation, weeks, index + 1, firstOffline);
         });
     }
 
@@ -506,6 +662,7 @@ public class MainActivity extends Activity {
         sectionCard.addView(ws.grid, matchWrap());
         ws.card = sectionCard;
         attachCardSwipeGesture(sectionCard);
+        attachGridTouch(ws);
 
         weekSections.add(insertIndex, ws);
         weekSectionsContainer.addView(sectionCard, insertIndex);
@@ -581,6 +738,7 @@ public class MainActivity extends Activity {
         TextView periodCell = new TextView(this);
         periodCell.setText(String.valueOf(p));
         periodCell.setTextColor(UiKit.TEXT_SECONDARY);
+        periodCell.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         periodCell.setTextSize(11);
         periodCell.setGravity(Gravity.CENTER);
         periodCell.setWidth(dp(20));
@@ -616,36 +774,66 @@ public class MainActivity extends Activity {
             dot.setGravity(Gravity.CENTER);
             cell.addView(dot);
         }
-        attachCellTouch(cell, e, date, period);
+        UiKit.attachBouncyPress(cell);
         return cell;
     }
 
-    private void attachCellTouch(View cell, Timetable.PeriodEntry e, String date, int period) {
-        final long[] startTime = {0};
+    // Long-press (~420ms hold, no drag needed to start it) swaps THIS grid
+    // live to the teacher's schedule while the finger is still down;
+    // dragging up locks it in, releasing without dragging up reverts back
+    // to the class view. Tapping any cell while a teacher's schedule is
+    // showing unlocks it.
+    //
+    // The listener lives on ws.grid itself (not on individual cells) so
+    // that swapping the grid's contents mid-gesture doesn't cancel the
+    // touch: rerenderAllSections() only replaces ws.grid's CHILDREN
+    // (removeAllViews + re-add), never ws.grid itself, so the view that
+    // actually owns this ongoing gesture is never detached. Attaching the
+    // gesture to individual cells (the earlier approach) broke this,
+    // because rebuilding necessarily destroyed whichever cell the finger
+    // was resting on, and Android cancels a touch stream when its target
+    // view is detached -- that's what caused the old "flashes then
+    // immediately reverts" bug. Cells still get UiKit.attachBouncyPress
+    // for tap feedback, but that listener never consumes the event (see
+    // its own comment), so everything always bubbles up here.
+    private void attachGridTouch(WeekSection ws) {
         final float[] startY = {0};
         final boolean[] longPressFired = {false};
         final boolean[] moved = {false};
+        final int[] downPeriod = {-1};
+        final int[] downDay = {-1};
+        final View[] touchedCell = {null};
         Handler handler = new Handler();
         final Runnable[] pending = new Runnable[1];
 
-        cell.setOnTouchListener((v, event) -> {
+        ws.grid.setOnTouchListener((v, event) -> {
             switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
-                    startTime[0] = System.currentTimeMillis();
+                case MotionEvent.ACTION_DOWN: {
                     startY[0] = event.getRawY();
                     longPressFired[0] = false;
                     moved[0] = false;
-                    v.animate().scaleX(0.94f).scaleY(0.94f).setDuration(80).start();
-                    if (e != null && !e.teacher.isEmpty()) {
-                        String teacherName = e.teacher;
-                        pending[0] = () -> {
-                            longPressFired[0] = true;
-                            enterTeacherViewTemp(teacherName);
-                        };
-                        handler.postDelayed(pending[0], 420);
+                    int[] hit = hitTestGrid(ws.grid, event.getX(), event.getY());
+                    downPeriod[0] = hit[0];
+                    downDay[0] = hit[1];
+                    touchedCell[0] = (hit[0] > 0 && hit[1] > 0)
+                            ? ((TableRow) ws.grid.getChildAt(hit[0])).getChildAt(hit[1]) : null;
+                    if (touchedCell[0] != null) {
+                        touchedCell[0].animate().scaleX(0.94f).scaleY(0.94f).setDuration(80).start();
+                    }
+                    if (viewingTeacherName == null && downPeriod[0] > 0 && downDay[0] > 0) {
+                        Timetable.PeriodEntry entry = findClassEntry(ws, downPeriod[0], downDay[0]);
+                        if (entry != null && !entry.teacher.isEmpty()) {
+                            String teacherName = entry.teacher;
+                            pending[0] = () -> {
+                                longPressFired[0] = true;
+                                enterTeacherViewLive(teacherName);
+                            };
+                            handler.postDelayed(pending[0], 420);
+                        }
                     }
                     return true;
-                case MotionEvent.ACTION_MOVE:
+                }
+                case MotionEvent.ACTION_MOVE: {
                     float dy = startY[0] - event.getRawY();
                     if (longPressFired[0] && !teacherViewLocked && dy > dp(70)) {
                         lockTeacherView();
@@ -654,34 +842,75 @@ public class MainActivity extends Activity {
                         if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     }
                     return true;
-                case MotionEvent.ACTION_UP:
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(160)
-                            .setInterpolator(new OvershootInterpolator(4f)).start();
+                }
+                case MotionEvent.ACTION_UP: {
+                    if (touchedCell[0] != null) {
+                        touchedCell[0].animate().scaleX(1f).scaleY(1f).setDuration(100)
+                                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+                    }
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     if (longPressFired[0]) {
                         if (!teacherViewLocked) exitTeacherView();
                     } else if (!moved[0]) {
                         if (viewingTeacherName != null) {
                             exitTeacherView();
-                        } else if (!date.isEmpty()) {
-                            openEventDialog(date, period, e);
+                        } else if (downPeriod[0] > 0 && downDay[0] > 0) {
+                            String date = dateForDay(ws.tt, downDay[0]);
+                            if (!date.isEmpty()) {
+                                openEventDialog(date, downPeriod[0], findClassEntry(ws, downPeriod[0], downDay[0]));
+                            }
                         }
                     }
                     return true;
-                case MotionEvent.ACTION_CANCEL:
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                }
+                case MotionEvent.ACTION_CANCEL: {
+                    if (touchedCell[0] != null) {
+                        touchedCell[0].animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                    }
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     if (longPressFired[0] && !teacherViewLocked) exitTeacherView();
                     return true;
+                }
             }
             return false;
         });
     }
 
+    // Maps a raw touch point (in ws.grid's own coordinate space) to
+    // {period, dayOfWeek} by walking the already-laid-out rows/cells --
+    // valid because renderWeekSection always builds row child index i =
+    // period i, and within a row, cell child index j = day-of-week j (both
+    // header/period-number slots at index 0). Returns {-1, -1} on a miss.
+    private int[] hitTestGrid(TableLayout grid, float x, float y) {
+        for (int i = 1; i < grid.getChildCount(); i++) {
+            View rowView = grid.getChildAt(i);
+            if (y < rowView.getTop() || y >= rowView.getBottom()) continue;
+            if (!(rowView instanceof TableRow)) break;
+            TableRow row = (TableRow) rowView;
+            for (int j = 1; j < row.getChildCount(); j++) {
+                View cell = row.getChildAt(j);
+                // cell.getLeft()/getRight() are relative to the row, not the
+                // grid, so translate by the row's own offset within the grid.
+                if (x >= row.getLeft() + cell.getLeft() && x < row.getLeft() + cell.getRight()) {
+                    return new int[]{i, j};
+                }
+            }
+            break;
+        }
+        return new int[]{-1, -1};
+    }
+
+    private Timetable.PeriodEntry findClassEntry(WeekSection ws, int period, int dayOfWeek) {
+        int cn = browseClassNum > 0 ? browseClassNum : prefs.classNum();
+        for (Timetable.PeriodEntry e : ws.tt.getDaySchedule(prefs.grade(), cn, dayOfWeek)) {
+            if (e.period == period) return e;
+        }
+        return null;
+    }
+
     private View gridCellForTeacher(Timetable.TeacherPeriodEntry e) {
         LinearLayout cell = emptyCell();
         if (e != null) fillCell(cell, e.subject, e.grade + "-" + e.classNum, e.changed);
-        cell.setOnClickListener(v -> exitTeacherView());
         UiKit.attachBouncyPress(cell);
         return cell;
     }
@@ -695,16 +924,21 @@ public class MainActivity extends Activity {
         cell.setLayoutParams(lp);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(UiKit.SURFACE_ALT);
-        bg.setCornerRadius(dp(6));
+        bg.setCornerRadius(dp(4));
+        bg.setStroke(Math.max(1, dp(1)), UiKit.BORDER);
         cell.setBackground(bg);
         return cell;
     }
 
     private void fillCell(LinearLayout cell, String subject, String subLabel, boolean changed) {
-        int color = prefs.subjectColor(subject);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(blend(color, UiKit.SURFACE, 0.72f));
-        bg.setCornerRadius(dp(6));
+        if (prefs.solidTimetableColor()) {
+            int base = prefs.solidBaseColor();
+            bg.setColor(changed ? UiKit.darken(base, 0.6f) : base);
+        } else {
+            bg.setColor(blend(prefs.subjectColor(subject), UiKit.SURFACE, 0.72f));
+        }
+        bg.setCornerRadius(dp(4));
         cell.setBackground(bg);
         cell.setPadding(dp(4), dp(5), dp(4), dp(5));
 
@@ -751,63 +985,17 @@ public class MainActivity extends Activity {
         return 0xFF000000 | (r << 16) | (g << 8) | b;
     }
 
-    private FrameLayout buildTeacherPreviewOverlay() {
-        teacherPreviewOverlay = new FrameLayout(this);
-        teacherPreviewOverlay.setBackgroundColor(0xCC000000);
-        teacherPreviewOverlay.setVisibility(View.GONE);
-        teacherPreviewOverlay.setClickable(true);
-        teacherPreviewOverlay.setOnClickListener(v -> exitTeacherView());
-
-        LinearLayout sheet = new LinearLayout(this);
-        sheet.setOrientation(LinearLayout.VERTICAL);
-        sheet.setBackground(UiKit.card());
-        sheet.setPadding(dp(16), dp(16), dp(16), dp(16));
-        sheet.setClickable(true);
-        sheet.setOnClickListener(v -> {}); // swallow taps inside the sheet itself
-
-        teacherPreviewTitle = new TextView(this);
-        teacherPreviewTitle.setTextColor(UiKit.TEXT_PRIMARY);
-        teacherPreviewTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        teacherPreviewTitle.setTextSize(16);
-        sheet.addView(teacherPreviewTitle);
-
-        TextView tapHint = new TextView(this);
-        tapHint.setText("바깥을 탭하면 닫혀요");
-        tapHint.setTextColor(UiKit.TEXT_SECONDARY);
-        tapHint.setTextSize(11);
-        tapHint.setPadding(0, dp(2), 0, dp(10));
-        sheet.addView(tapHint);
-
-        ScrollView scroll = new ScrollView(this);
-        teacherPreviewContent = new LinearLayout(this);
-        teacherPreviewContent.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(teacherPreviewContent);
-        sheet.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
-
-        FrameLayout.LayoutParams sheetLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sheetLp.gravity = Gravity.BOTTOM;
-        int m = dp(16);
-        sheetLp.setMargins(m, m, m, m);
-        teacherPreviewOverlay.addView(sheet, sheetLp);
-        return teacherPreviewOverlay;
-    }
-
-    // Shows the teacher's schedule in a SEPARATE overlay that never
-    // touches the main grid's view hierarchy -- rebuilding the grid the
-    // finger is still resting on mid-gesture was exactly what caused the
-    // "flashes then immediately reverts" bug (Android auto-cancels the
-    // touch when its view gets detached).
-    private void enterTeacherViewTemp(String teacherName) {
+    // Long-press fired: swap this AND every other section's grid to the
+    // teacher's schedule immediately, live, while the finger is still
+    // down (see attachGridTouch for why this is safe -- the touch
+    // listener lives on ws.grid, which rerenderAllSections() never
+    // detaches, only its children).
+    private void enterTeacherViewLive(String teacherName) {
         viewingTeacherName = teacherName;
         teacherViewLocked = false;
-        teacherPreviewTitle.setText(teacherName + " 선생님 시간표");
-        renderTeacherPreview(teacherName);
-        teacherPreviewOverlay.setVisibility(View.VISIBLE);
-        teacherPreviewOverlay.setAlpha(0f);
-        teacherPreviewOverlay.animate().alpha(1f).setDuration(150).start();
-        teacherModeIndicator.setText(teacherName + " 선생님 시간표 보는 중 -- 위로 밀면 고정");
+        teacherModeIndicator.setText(teacherName + " 선생님 시간표 -- 위로 밀면 고정");
         teacherModeIndicator.setVisibility(View.VISIBLE);
+        rerenderAllSections();
     }
 
     private void lockTeacherView() {
@@ -820,41 +1008,7 @@ public class MainActivity extends Activity {
         viewingTeacherName = null;
         teacherViewLocked = false;
         teacherModeIndicator.setVisibility(View.GONE);
-        teacherPreviewOverlay.animate().alpha(0f).setDuration(120)
-                .withEndAction(() -> teacherPreviewOverlay.setVisibility(View.GONE)).start();
-    }
-
-    private void renderTeacherPreview(String teacherName) {
-        teacherPreviewContent.removeAllViews();
-        for (WeekSection ws : weekSections) {
-            List<Timetable.TeacherPeriodEntry> all = ws.tt.getTeacherWeek(teacherName);
-            LinearLayout weekBlock = new LinearLayout(this);
-            weekBlock.setOrientation(LinearLayout.VERTICAL);
-            weekBlock.setPadding(0, dp(4), 0, dp(12));
-
-            TableLayout grid = new TableLayout(this);
-            grid.setStretchAllColumns(false);
-            for (int c = 1; c <= 5; c++) grid.setColumnStretchable(c, true);
-            TableRow header = new TableRow(this);
-            header.addView(gridHeaderCell(""));
-            for (int d = 1; d <= 5; d++) header.addView(gridHeaderCell(DOW_SHORT[d]));
-            grid.addView(header);
-
-            int maxPeriod = 1;
-            for (Timetable.TeacherPeriodEntry e : all) maxPeriod = Math.max(maxPeriod, e.period);
-            for (int p = 1; p <= maxPeriod; p++) {
-                TableRow row = new TableRow(this);
-                row.addView(periodNumCell(p));
-                for (int d = 1; d <= 5; d++) {
-                    Timetable.TeacherPeriodEntry match = null;
-                    for (Timetable.TeacherPeriodEntry e : all) if (e.period == p && e.dayOfWeek == d) { match = e; break; }
-                    row.addView(gridCellForTeacher(match));
-                }
-                grid.addView(row);
-            }
-            weekBlock.addView(grid);
-            teacherPreviewContent.addView(weekBlock);
-        }
+        rerenderAllSections();
     }
 
     private void attachCardSwipeGesture(View cardView) {
@@ -990,8 +1144,8 @@ public class MainActivity extends Activity {
                 list.addView(row);
                 row.setTranslationX(dp(30));
                 row.setAlpha(0f);
-                row.animate().alpha(1f).translationX(0f).setStartDelay(i * 40L).setDuration(280)
-                        .setInterpolator(new OvershootInterpolator(2f)).start();
+                row.animate().alpha(1f).translationX(0f).setStartDelay(i * 40L).setDuration(160)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             }
         }
         scroll.addView(list);
@@ -1110,8 +1264,8 @@ public class MainActivity extends Activity {
     }
 
     // ==================== SETTINGS PAGE (accordion, decluttered) ====================
-    private LinearLayout accSchool, accTheme, accNotif, accMeal;
-    private Button accSchoolBtn, accThemeBtn, accNotifBtn, accMealBtn;
+    private LinearLayout accSchool, accTheme, accNotif, accMeal, accMapping;
+    private Button accSchoolBtn, accThemeBtn, accNotifBtn, accMealBtn, accMappingBtn;
 
     private LinearLayout buildSettingsPage() {
         LinearLayout root = new LinearLayout(this);
@@ -1134,16 +1288,19 @@ public class MainActivity extends Activity {
         accTheme = buildThemeSection();
         accNotif = buildNotifSection();
         accMeal = buildMealSection();
+        accMapping = buildMappingSection();
 
         accSchoolBtn = accordionHeader("\ud83c\udfeb  학교 / 학급", accSchool);
         accThemeBtn = accordionHeader("\ud83c\udfa8  테마 (과목 색상)", accTheme);
         accNotifBtn = accordionHeader("\ud83d\udd14  알림", accNotif);
         accMealBtn = accordionHeader("\ud83c\udf7d  급식 연동", accMeal);
+        accMappingBtn = accordionHeader("🗺  실내 지도 만들기 (실험)", accMapping);
 
         list.addView(accSchoolBtn); list.addView(accSchool);
         list.addView(accThemeBtn); list.addView(accTheme);
         list.addView(accNotifBtn); list.addView(accNotif);
         list.addView(accMealBtn); list.addView(accMeal);
+        list.addView(accMappingBtn); list.addView(accMapping);
 
         scroll.addView(list);
         root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -1162,7 +1319,7 @@ public class MainActivity extends Activity {
         b.setLayoutParams(lp);
         b.setOnClickListener(v -> {
             boolean opening = content.getVisibility() != View.VISIBLE;
-            for (LinearLayout other : new LinearLayout[]{accSchool, accTheme, accNotif, accMeal}) {
+            for (LinearLayout other : new LinearLayout[]{accSchool, accTheme, accNotif, accMeal, accMapping}) {
                 if (other != null) other.setVisibility(View.GONE);
             }
             if (opening) {
@@ -1271,8 +1428,53 @@ public class MainActivity extends Activity {
         section.setVisibility(View.GONE);
         section.setPadding(0, dp(4), 0, dp(16));
 
+        LinearLayout displayCard = card();
+        displayCard.addView(eyebrow("표시 방식"));
+        solidColorCheck = styledCheckbox("단색으로 표시 (모든 과목 같은 색, 변동은 진한 색)");
+        LinearLayout.LayoutParams solidLp = matchWrap();
+        solidLp.topMargin = dp(4);
+        displayCard.addView(solidColorCheck, solidLp);
+
+        LinearLayout baseColorRow = new LinearLayout(this);
+        baseColorRow.setOrientation(LinearLayout.HORIZONTAL);
+        baseColorRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams baseColorRowLp = matchWrap();
+        baseColorRowLp.topMargin = dp(8);
+        TextView baseColorLabel = new TextView(this);
+        baseColorLabel.setText("단색 모드 기준 색");
+        UiKit.styleCaption(baseColorLabel);
+        baseColorRow.addView(baseColorLabel, weightedWrap());
+        View baseColorSwatch = new View(this);
+        GradientDrawable baseColorSwatchBg = new GradientDrawable();
+        baseColorSwatchBg.setColor(prefs.solidBaseColor());
+        baseColorSwatchBg.setCornerRadius(dp(8));
+        baseColorSwatch.setBackground(baseColorSwatchBg);
+        LinearLayout.LayoutParams baseColorSwatchLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+        baseColorSwatch.setLayoutParams(baseColorSwatchLp);
+        baseColorSwatch.setClickable(true);
+        baseColorSwatch.setFocusable(true);
+        UiKit.attachBouncyPress(baseColorSwatch);
+        baseColorSwatch.setOnClickListener(v -> UiKit.showColorPicker(this, color -> {
+            prefs.setSolidBaseColor(color);
+            baseColorSwatchBg.setColor(color);
+            rerenderAllSections();
+        }));
+        baseColorRow.addView(baseColorSwatch);
+        displayCard.addView(baseColorRow, baseColorRowLp);
+
+        solidColorCheck.setOnCheckedChangeListener((b, checked) -> {
+            prefs.setSolidTimetableColor(checked);
+            rerenderAllSections();
+        });
+        section.addView(displayCard, cardLp());
+
         LinearLayout colorsCard = card();
-        colorsCard.addView(eyebrow("과목 색상"));
+        colorsCard.addView(eyebrow("과목별 색상"));
+        TextView colorsHint = new TextView(this);
+        colorsHint.setText("단색 모드가 꺼져 있을 때 사용돼요.");
+        UiKit.styleCaption(colorsHint);
+        colorsHint.setPadding(0, dp(2), 0, 0);
+        colorsCard.addView(colorsHint);
         colorsList = new LinearLayout(this);
         colorsList.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams clp = matchWrap();
@@ -1387,6 +1589,110 @@ public class MainActivity extends Activity {
         section.addView(keyCard, cardLp());
 
         return section;
+    }
+
+    private LinearLayout buildMappingSection() {
+        LinearLayout section = new LinearLayout(this);
+        section.setOrientation(LinearLayout.VERTICAL);
+        section.setVisibility(View.GONE);
+        section.setPadding(0, dp(4), 0, dp(16));
+
+        LinearLayout infoCard = card();
+        infoCard.addView(eyebrow("실내 지도 데이터 수집 (실험 기능)"));
+        TextView desc = new TextView(this);
+        desc.setText("학교 실내 위치 지도를 만들기 위한 테스트 기능이에요. 시작을 누르고 걸어 다니기만 하면 걸음 수와 방향으로 이동 경로를 자동으로 계산해서 Wi-Fi 신호 세기와 함께 기록해요 (수동으로 위치를 입력할 필요 없어요). 서버로 보내지 않고, 특정 인물과 연결되지 않는 익명 데이터로 이 기기에만 저장해요.");
+        UiKit.styleCaption(desc);
+        desc.setPadding(0, dp(6), 0, 0);
+        infoCard.addView(desc);
+        section.addView(infoCard, cardLp());
+
+        LinearLayout statusCard = card();
+        mappingStatusText = new TextView(this);
+        UiKit.styleBody(mappingStatusText);
+        mappingStatusText.setText("꺼짐");
+        statusCard.addView(mappingStatusText);
+
+        Button toggleBtn = new Button(this);
+        toggleBtn.setText("매핑 시작");
+        UiKit.stylePrimaryButton(toggleBtn);
+        LinearLayout.LayoutParams toggleLp = matchWrap();
+        toggleLp.topMargin = dp(10);
+        toggleBtn.setOnClickListener(v -> {
+            if (mappingCollector.isRunning()) {
+                mappingCollector.stop();
+                toggleBtn.setText("매핑 시작");
+                refreshMappingStatus();
+            } else {
+                requestMappingPermissionsIfNeeded(() -> {
+                    mappingCollector.start();
+                    toggleBtn.setText("매핑 중지");
+                    refreshMappingStatus();
+                });
+            }
+        });
+        statusCard.addView(toggleBtn, toggleLp);
+        section.addView(statusCard, cardLp());
+
+        LinearLayout waypointCard = card();
+        waypointCard.addView(eyebrow("위치 이름표 (선택)"));
+        TextView waypointHint = new TextView(this);
+        waypointHint.setText("이동 경로는 자동으로 기록돼요. 나중에 지도에 이름을 붙이고 싶은 지점이 있으면 여기서 표시해두세요.");
+        UiKit.styleCaption(waypointHint);
+        waypointHint.setPadding(0, dp(2), 0, 0);
+        waypointCard.addView(waypointHint);
+        LinearLayout wRow = new LinearLayout(this);
+        wRow.setOrientation(LinearLayout.HORIZONTAL);
+        wRow.setPadding(0, dp(6), 0, 0);
+        mappingFloorInput = new EditText(this);
+        mappingFloorInput.setHint("층 (예: 3층)");
+        UiKit.styleInput(mappingFloorInput);
+        LinearLayout.LayoutParams floorLp = weightedWrap();
+        floorLp.rightMargin = dp(8);
+        wRow.addView(mappingFloorInput, floorLp);
+        mappingLabelInput = new EditText(this);
+        mappingLabelInput.setHint("위치 (예: 3-1반 앞)");
+        UiKit.styleInput(mappingLabelInput);
+        wRow.addView(mappingLabelInput, weightedWrap());
+        waypointCard.addView(wRow);
+
+        Button waypointBtn = new Button(this);
+        waypointBtn.setText("여기 표시");
+        UiKit.styleSecondaryButton(waypointBtn);
+        LinearLayout.LayoutParams waypointLp = matchWrap();
+        waypointLp.topMargin = dp(8);
+        waypointBtn.setOnClickListener(v -> {
+            if (!mappingCollector.isRunning()) {
+                Toast.makeText(this, "먼저 매핑을 시작해주세요.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            String floor = mappingFloorInput.getText().toString().trim();
+            String label = mappingLabelInput.getText().toString().trim();
+            if (label.isEmpty()) {
+                Toast.makeText(this, "위치를 입력해주세요.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            mappingCollector.addWaypoint(floor, label);
+            mappingLabelInput.setText("");
+            Toast.makeText(this, "표시했어요: " + floor + " " + label, Toast.LENGTH_SHORT).show();
+            refreshMappingStatus();
+        });
+        waypointCard.addView(waypointBtn, waypointLp);
+        section.addView(waypointCard, cardLp());
+
+        mappingCountsText = new TextView(this);
+        UiKit.styleCaption(mappingCountsText);
+        LinearLayout.LayoutParams countsLp = matchWrap();
+        countsLp.topMargin = dp(4);
+        section.addView(mappingCountsText, countsLp);
+
+        return section;
+    }
+
+    private void refreshMappingStatus() {
+        if (mappingStatusText == null || mappingCollector == null) return;
+        if (!mappingCollector.isRunning()) mappingStatusText.setText("꺼짐");
+        MappingDb.Counts c = mappingCollector.counts();
+        mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans + "개 · 이름표 " + c.waypoints + "개");
     }
 
     private AutoCompleteTextView makePickerInput(String[] options) {
@@ -1682,6 +1988,7 @@ public class MainActivity extends Activity {
         notifyPeriodCheck.setChecked(prefs.notifyPeriod());
         notifyMorningCheck.setChecked(prefs.notifyMorning());
         liveNotifyCheck.setChecked(prefs.liveNotify());
+        solidColorCheck.setChecked(prefs.solidTimetableColor());
         morningTimeInput.setText(prefs.morningTime());
         for (int i = 0; i < 8; i++) periodInputs[i].setText(prefs.periodTime(i + 1));
         neisKeyInput.setText(prefs.neisApiKey());

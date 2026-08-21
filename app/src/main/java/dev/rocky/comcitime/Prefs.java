@@ -51,6 +51,14 @@ public class Prefs {
         return sp.getInt("subjcolor_" + subject, 0) != 0;
     }
 
+    // When on, every timetable cell uses the same solid base color
+    // (per-subject colors are ignored) and a changed period is shown as a
+    // darker shade of that same base color.
+    public boolean solidTimetableColor() { return sp.getBoolean("solidTimetableColor", false); }
+    public void setSolidTimetableColor(boolean v) { sp.edit().putBoolean("solidTimetableColor", v).apply(); }
+    public int solidBaseColor() { return sp.getInt("solidBaseColor", 0xFF5B8CFF); }
+    public void setSolidBaseColor(int color) { sp.edit().putInt("solidBaseColor", color).apply(); }
+
     // Every subject name ever seen, so the color-settings screen has
     // something to list even before today's fetch completes again.
     public java.util.Set<String> knownSubjects() {
@@ -112,6 +120,13 @@ public class Prefs {
     // ---------- onboarding ----------
     public boolean onboardingDone() { return sp.getBoolean("onboardingDone", false); }
     public void setOnboardingDone(boolean v) { sp.edit().putBoolean("onboardingDone", v).apply(); }
+
+    // Separate from onboardingDone so that someone who already onboarded
+    // BEFORE the indoor-mapping disclosure existed is still shown it and
+    // must agree before the app becomes usable again -- not just new
+    // installs.
+    public boolean mappingConsentDone() { return sp.getBoolean("mappingConsentDone", false); }
+    public void setMappingConsentDone(boolean v) { sp.edit().putBoolean("mappingConsentDone", v).apply(); }
 
     // ---------- NEIS (optional meal info) ----------
     public String neisApiKey() { return sp.getString("neisKey", ""); }
