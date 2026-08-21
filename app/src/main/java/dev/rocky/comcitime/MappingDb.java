@@ -175,6 +175,89 @@ public class MappingDb extends SQLiteOpenHelper {
         return out;
     }
 
+    // One historical Wi-Fi scan snapshot (all BSSIDs seen in the same
+    // scan, sharing the same session_id+ts), tagged with the dead-reckoned
+    // position at that moment -- the unit of a Wi-Fi fingerprint map.
+    private static class Fingerprint {
+        double x, y;
+        java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
+    }
+
+    private List<Fingerprint> allFingerprints() {
+        java.util.LinkedHashMap<String, Fingerprint> byKey = new java.util.LinkedHashMap<>();
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor cur = db.rawQuery(
+                "SELECT session_id, ts, x, y, bssid, rssi FROM radio_scans ORDER BY session_id, ts", null)) {
+            while (cur.moveToNext()) {
+                String key = cur.getLong(0) + ":" + cur.getLong(1);
+                double x = cur.getDouble(2);
+                double y = cur.getDouble(3);
+                Fingerprint fp = byKey.computeIfAbsent(key, k -> {
+                    Fingerprint f = new Fingerprint();
+                    f.x = x; f.y = y;
+                    return f;
+                });
+                fp.rssiByBssid.put(cur.getString(4), cur.getInt(5));
+            }
+        }
+        return new ArrayList<>(byKey.values());
+    }
+
+    // Count of distinct Wi-Fi scan snapshots recorded so far (one per
+    // fingerprint), so Settings can show how much fingerprint data exists.
+    public int fingerprintCount() {
+        SQLiteDatabase db = getReadableDatabase();
+        return countRows(db, "SELECT COUNT(DISTINCT session_id || ':' || ts) FROM radio_scans");
+    }
+
+    // Estimates a position by k-nearest-neighbor matching a live Wi-Fi
+    // scan's RSSI signature against every recorded fingerprint -- the
+    // standard indoor Wi-Fi-fingerprinting technique (RADAR-style), and
+    // more robust indoors than first estimating each AP's own physical
+    // position (see estimateApPositions above) since it never needs that
+    // intermediate step to be accurate. Distance between two fingerprints
+    // is the RMS RSSI difference over shared BSSIDs, with a fixed penalty
+    // per BSSID present in one scan but not the other; the result is the
+    // inverse-distance-weighted average position of the closest k matches.
+    // Returns null when there's nothing to compare against yet, or the
+    // live scan shares no BSSID with any recorded fingerprint.
+    public double[] estimateLocationFromFingerprint(java.util.Map<String, Integer> liveRssi, int k) {
+        if (liveRssi == null || liveRssi.isEmpty()) return null;
+        List<Fingerprint> all = allFingerprints();
+        if (all.isEmpty()) return null;
+
+        List<double[]> scored = new ArrayList<>(); // {distance, x, y}
+        for (Fingerprint fp : all) {
+            double sumSq = 0;
+            int shared = 0;
+            for (java.util.Map.Entry<String, Integer> e : liveRssi.entrySet()) {
+                Integer other = fp.rssiByBssid.get(e.getKey());
+                if (other != null) {
+                    double diff = e.getValue() - other;
+                    sumSq += diff * diff;
+                    shared++;
+                } else {
+                    sumSq += 400; // ~20dB mismatch penalty for a BSSID missing here
+                }
+            }
+            if (shared == 0) continue; // no overlap at all -- not comparable
+            scored.add(new double[]{Math.sqrt(sumSq / liveRssi.size()), fp.x, fp.y});
+        }
+        if (scored.isEmpty()) return null;
+
+        scored.sort((a, b) -> Double.compare(a[0], b[0]));
+        int n = Math.min(k, scored.size());
+        double wSum = 0, wx = 0, wy = 0;
+        for (int i = 0; i < n; i++) {
+            double[] s = scored.get(i);
+            double w = 1.0 / (s[0] + 1.0); // +1 avoids div-by-zero on an exact match
+            wSum += w;
+            wx += w * s[1];
+            wy += w * s[2];
+        }
+        return new double[]{wx / wSum, wy / wSum};
+    }
+
     // Chronological (x, y) trail from the most recent motion samples, for
     // the Settings 3D path drawing. Small on-demand read, same reasoning
     // as estimateApPositions() above.

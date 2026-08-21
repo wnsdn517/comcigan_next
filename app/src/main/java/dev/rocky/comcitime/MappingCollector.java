@@ -25,14 +25,40 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 // Drives one indoor-mapping data-collection session: periodic Wi-Fi scans
-// (BSSID/RSSI/frequency) plus a fused compass heading and step count from
-// motion sensors, alongside a set of lower-priority raw signals (raw
-// accelerometer/gyroscope/magnetometer, barometer, a rough GPS/GNSS fix,
-// screen rotation) kept only as live in-memory history for the Settings
-// debug graphs -- not persisted, since they're only useful as a live
-// sanity check on what the higher-priority signals above are already
-// doing with them. Everything that IS persisted goes through MappingDb
-// on-device only -- there is no network upload in this build.
+// (BSSID/RSSI/frequency) plus dead reckoning from motion sensors, alongside
+// a set of lower-priority raw signals (raw accelerometer/gyroscope/
+// magnetometer, barometer, a rough GPS/GNSS fix, screen rotation) kept
+// only as live in-memory history for the Settings debug graphs -- not
+// persisted, since they're only useful as a live sanity check on what the
+// higher-priority signals above are already doing with them. Everything
+// that IS persisted goes through MappingDb on-device only -- there is no
+// network upload in this build.
+//
+// Dead reckoning deliberately avoids two things a naive implementation
+// would lean on:
+//  - The magnetometer-fused compass heading, for the direction of travel.
+//    Indoors, magnetic fields are heavily distorted by rebar/wiring/metal
+//    furniture, so a compass heading can be badly wrong right where this
+//    matters most. Instead, direction is tracked by integrating the raw
+//    gyroscope's yaw rate (gyroYawDeg below), bootstrapped once from the
+//    fused heading at startup -- immune to magnetic interference, at the
+//    cost of slow drift, which the Wi-Fi fingerprint correction below
+//    keeps in check.
+//  - A fixed, user-entered stride length, for step distance. Actual
+//    stride varies with walking speed and isn't something most people
+//    know precisely. Instead each step's length is estimated from that
+//    step's own accelerometer swing via Weinberg's formula (see
+//    estimateStepLength()), a standard step-length-estimation technique.
+//
+// The resulting trajectory only needs to be locally consistent, not
+// metrically perfect: every Wi-Fi scan is tagged with the position dead
+// reckoning reports at that instant, building a fingerprint map (see
+// MappingDb.estimateLocationFromFingerprint) that later scans get matched
+// against -- and each time a scan finds a confident fingerprint match,
+// the position is nudged toward it (see recordScanResults()), a simple
+// complementary-filter fusion that pulls accumulated drift back in line
+// without needing a full Kalman/particle filter for this experimental
+// scope.
 public class MappingCollector {
 
     public interface Listener {
@@ -77,11 +103,23 @@ public class MappingCollector {
     private final float[] rotationMatrix = new float[9];
     private final float[] orientation = new float[3];
 
-    // Stride length in meters, used to turn a step count into a distance
-    // for dead reckoning. User-calibratable in Settings (Prefs.strideLengthM())
-    // since actual stride varies by person; setStrideLengthM() applies the
-    // change immediately to whichever session is currently running.
-    private double strideLengthM;
+    // Gyroscope-integrated yaw, used for dead-reckoning direction instead
+    // of the magnetometer-fused heading above (see class doc). NaN until
+    // bootstrapped once from the first fused-heading reading.
+    private double gyroYawDeg = Double.NaN;
+    private long lastGyroTimestampNs = 0;
+
+    // Running min/max of accelerometer magnitude since the last step,
+    // feeding Weinberg's per-step dynamic stride-length estimate (see
+    // estimateStepLength()) instead of a fixed constant.
+    private float accelMinInStep = Float.MAX_VALUE, accelMaxInStep = -Float.MAX_VALUE;
+    private double lastStepLengthM = 0.7;
+    private static final double STEP_LENGTH_K = 0.5; // Weinberg's empirical constant
+
+    // Last Wi-Fi scan's {bssid: rssi}, used both to persist the scan and
+    // to match it against the fingerprint map for the drift correction
+    // described in the class doc.
+    private java.util.Map<String, Integer> lastScanRssi = new java.util.HashMap<>();
 
     // ---- lower-priority raw signals (see class doc): latest value only,
     // plus a rolling history buffer per signal for the debug graphs.
@@ -130,19 +168,36 @@ public class MappingCollector {
                     headingDeg = (deg + 360f) % 360f;
                     pitchDeg = (float) Math.toDegrees(orientation[1]);
                     rollDeg = (float) Math.toDegrees(orientation[2]);
+                    if (Double.isNaN(gyroYawDeg)) gyroYawDeg = headingDeg; // one-time bootstrap
                     break;
                 case Sensor.TYPE_STEP_DETECTOR:
                     stepCount++;
-                    double rad = Math.toRadians(headingDeg);
-                    posX += strideLengthM * Math.sin(rad);
-                    posY += strideLengthM * Math.cos(rad);
+                    double stepLen = estimateStepLength();
+                    double dirDeg = Double.isNaN(gyroYawDeg) ? headingDeg : gyroYawDeg;
+                    double rad = Math.toRadians(dirDeg);
+                    posX += stepLen * Math.sin(rad);
+                    posY += stepLen * Math.cos(rad);
+                    lastStepLengthM = stepLen;
+                    accelMinInStep = Float.MAX_VALUE;
+                    accelMaxInStep = -Float.MAX_VALUE;
                     recordMotionSample();
                     break;
                 case Sensor.TYPE_ACCELEROMETER:
                     accelMag = vectorMag(event.values);
+                    accelMinInStep = Math.min(accelMinInStep, accelMag);
+                    accelMaxInStep = Math.max(accelMaxInStep, accelMag);
                     break;
                 case Sensor.TYPE_GYROSCOPE:
                     gyroMag = vectorMag(event.values);
+                    if (lastGyroTimestampNs != 0 && !Double.isNaN(gyroYawDeg)) {
+                        double dt = (event.timestamp - lastGyroTimestampNs) / 1_000_000_000.0;
+                        // z-axis angular rate approximates yaw rate while the
+                        // phone is held roughly upright, consistent with the
+                        // rest of this class's simplifications.
+                        double dYaw = Math.toDegrees(event.values[2]) * dt;
+                        gyroYawDeg = ((gyroYawDeg + dYaw) % 360 + 360) % 360;
+                    }
+                    lastGyroTimestampNs = event.timestamp;
                     break;
                 case Sensor.TYPE_MAGNETIC_FIELD:
                     magFieldUt = vectorMag(event.values);
@@ -162,6 +217,18 @@ public class MappingCollector {
         return (float) Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
     }
 
+    // Weinberg's dynamic step-length formula: length = K * (a_max - a_min)^(1/4),
+    // over the accelerometer swing observed during the step that just
+    // finished. Clamped to a physically plausible walking-stride range so
+    // a noisy first step (before accelMinInStep/accelMaxInStep have a real
+    // window) can't produce an absurd jump.
+    private double estimateStepLength() {
+        if (accelMaxInStep <= accelMinInStep) return lastStepLengthM;
+        double swing = accelMaxInStep - accelMinInStep;
+        double len = STEP_LENGTH_K * Math.pow(swing, 0.25);
+        return Math.max(0.3, Math.min(1.0, len));
+    }
+
     private final Runnable scanTick = new Runnable() {
         @Override
         public void run() {
@@ -177,7 +244,6 @@ public class MappingCollector {
         this.wifiManager = (WifiManager) this.ctx.getSystemService(Context.WIFI_SERVICE);
         this.sensorManager = (SensorManager) this.ctx.getSystemService(Context.SENSOR_SERVICE);
         this.locationManager = (LocationManager) this.ctx.getSystemService(Context.LOCATION_SERVICE);
-        this.strideLengthM = new Prefs(this.ctx).strideLengthM();
     }
 
     public void setListener(Listener l) {
@@ -188,11 +254,9 @@ public class MappingCollector {
         return running;
     }
 
-    public void setStrideLengthM(double meters) {
-        this.strideLengthM = meters;
-    }
-
     public float getHeadingDeg() { return headingDeg; }
+    public double getLastStepLengthM() { return lastStepLengthM; }
+    public java.util.Map<String, Integer> getLastScanRssi() { return lastScanRssi; }
     public float getPitchDeg() { return pitchDeg; }
     public float getRollDeg() { return rollDeg; }
     public int getStepCount() { return stepCount; }
@@ -258,6 +322,10 @@ public class MappingCollector {
         posY = 0;
         refPressureHpa = 0f;
         historyCount = 0;
+        gyroYawDeg = Double.NaN;
+        lastGyroTimestampNs = 0;
+        accelMinInStep = Float.MAX_VALUE;
+        accelMaxInStep = -Float.MAX_VALUE;
         sessionId = db.startSession();
 
         ctx.registerReceiver(scanReceiver, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
@@ -361,14 +429,31 @@ public class MappingCollector {
             return; // permission revoked mid-session
         }
         int top = -120;
-        for (ScanResult r : results) if (r.level > top) top = r.level;
+        java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
+        for (ScanResult r : results) {
+            if (r.level > top) top = r.level;
+            rssiByBssid.put(r.BSSID, r.level);
+        }
         lastTopRssi = top;
+        lastScanRssi = rssiByBssid;
         long sid = sessionId;
         long ts = System.currentTimeMillis();
         double x = posX, y = posY;
         dbExecutor.execute(() -> {
             for (ScanResult r : results) {
                 db.insertRadioScan(sid, ts, r.BSSID, r.level, r.frequency, x, y);
+            }
+            // Complementary-filter fusion (see class doc): a confident
+            // fingerprint match nudges the dead-reckoned position back
+            // toward it, so accumulated gyro/step drift gets corrected by
+            // every fresh scan instead of only ever growing.
+            double[] match = db.estimateLocationFromFingerprint(rssiByBssid, 5);
+            if (match != null) {
+                handler.post(() -> {
+                    double blend = 0.25;
+                    posX = posX * (1 - blend) + match[0] * blend;
+                    posY = posY * (1 - blend) + match[1] * blend;
+                });
             }
         });
         if (listener != null) listener.onScanCount(results.size());

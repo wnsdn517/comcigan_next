@@ -79,9 +79,9 @@ public class MainActivity extends Activity {
     private TextView mealStatusText;
     private LinearLayout mealContent;
 
-    private TextView mappingStatusText, mappingCountsText, mappingSensorText;
+    private TextView mappingStatusText, mappingCountsText, mappingSensorText, mappingStrideText;
     private Button mappingGrantBtn;
-    private EditText mappingFloorInput, mappingLabelInput, strideLengthInput;
+    private EditText mappingFloorInput, mappingLabelInput;
     private OrientationGizmoView mappingGizmoView;
     private MappingPathView mappingPathView;
     private SparklineView accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph;
@@ -1698,40 +1698,16 @@ public class MainActivity extends Activity {
         LinearLayout strideCard = card();
         strideCard.addView(eyebrow("원점 기준 이동 거리 계산"));
         TextView strideHint = new TextView(this);
-        strideHint.setText("걸음 수 × 보폭으로 위치를 추정해요. 보폭을 실제에 맞게 조정하면 정확도가 올라가요.");
+        strideHint.setText("걸음마다 가속도 변화폭으로 보폭을 자동 추정하고(고정값 입력 없음), 방향은 자기장 왜곡에 취약한 나침반 대신 자이로스코프를 적분해서 따라가요. Wi-Fi 스캔이 지문 지도와 맞을 때마다 위치를 살짝 보정해요.");
         UiKit.styleCaption(strideHint);
         strideHint.setPadding(0, dp(2), 0, 0);
         strideCard.addView(strideHint);
-        LinearLayout strideRow = new LinearLayout(this);
-        strideRow.setOrientation(LinearLayout.HORIZONTAL);
-        strideRow.setPadding(0, dp(8), 0, 0);
-        strideLengthInput = new EditText(this);
-        strideLengthInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        strideLengthInput.setText(String.valueOf(prefs.strideLengthM()));
-        UiKit.styleInput(strideLengthInput);
-        LinearLayout.LayoutParams strideInputLp = weightedWrap();
-        strideInputLp.rightMargin = dp(8);
-        strideRow.addView(strideLengthInput, strideInputLp);
-        Button strideSaveBtn = new Button(this);
-        strideSaveBtn.setText("m 저장");
-        UiKit.styleSecondaryButton(strideSaveBtn);
-        strideSaveBtn.setOnClickListener(v -> {
-            try {
-                float meters = Float.parseFloat(strideLengthInput.getText().toString().trim());
-                if (meters <= 0 || meters > 3) {
-                    Toast.makeText(this, "0~3m 사이로 입력해주세요.", Toast.LENGTH_SHORT).show();
-                    return;
-                }
-                prefs.setStrideLengthM(meters);
-                MappingCollector running = MappingService.getRunningCollector();
-                if (running != null) running.setStrideLengthM(meters);
-                Toast.makeText(this, "보폭을 " + meters + "m로 저장했어요.", Toast.LENGTH_SHORT).show();
-            } catch (NumberFormatException e) {
-                Toast.makeText(this, "숫자를 입력해주세요.", Toast.LENGTH_SHORT).show();
-            }
-        });
-        strideRow.addView(strideSaveBtn);
-        strideCard.addView(strideRow);
+        mappingStrideText = new TextView(this);
+        UiKit.styleBody(mappingStrideText);
+        mappingStrideText.setTypeface(Typeface.MONOSPACE);
+        LinearLayout.LayoutParams strideTextLp = matchWrap();
+        strideTextLp.topMargin = dp(8);
+        strideCard.addView(mappingStrideText, strideTextLp);
         Button resetOriginBtn = new Button(this);
         resetOriginBtn.setText("원점 재설정 (현재 위치를 0,0으로)");
         resetOriginBtn.setTextSize(12);
@@ -1833,8 +1809,11 @@ public class MainActivity extends Activity {
             mappingGrantBtn.setText("권한 허용하고 시작");
             mappingGrantBtn.setVisibility(View.VISIBLE);
         }
-        MappingDb.Counts c = new MappingDb(this).counts();
-        mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans + "개 · 이름표 " + c.waypoints + "개");
+        MappingDb mappingDb = new MappingDb(this);
+        MappingDb.Counts c = mappingDb.counts();
+        int fingerprints = mappingDb.fingerprintCount();
+        mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans
+                + "개 · 지문(위치별 스캔) " + fingerprints + "개 · 이름표 " + c.waypoints + "개");
         updateMappingSensorViews();
     }
 
@@ -1847,6 +1826,7 @@ public class MainActivity extends Activity {
         MappingCollector running = MappingService.getRunningCollector();
         if (running == null) {
             mappingSensorText.setText("수집 중이 아니에요.");
+            if (mappingStrideText != null) mappingStrideText.setText("");
             if (mappingGizmoView != null) mappingGizmoView.setOrientation(0, 0, 0);
             if (mappingPathView != null) mappingPathView.setPath(new ArrayList<>(), 0, 0);
             for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph}) {
@@ -1873,6 +1853,11 @@ public class MainActivity extends Activity {
         if (mappingPathView != null) {
             List<double[]> path = new MappingDb(this).recentPath(300);
             mappingPathView.setPath(path, x, y);
+        }
+        if (mappingStrideText != null) {
+            mappingStrideText.setText(String.format(Locale.KOREA,
+                    "최근 걸음 보폭(자동 추정) %.2fm  ·  방향 소스: 자이로 적분",
+                    running.getLastStepLengthM()));
         }
 
         running.pushRawHistorySample();
