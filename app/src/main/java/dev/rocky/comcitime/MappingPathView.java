@@ -3,6 +3,7 @@ package dev.rocky.comcitime;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.view.View;
 
 import java.util.ArrayList;
@@ -12,16 +13,20 @@ import java.util.List;
 // starting point) as an isometric "3D-looking" floor plan -- the closest
 // a flat Canvas gets to an actual 3D plot without pulling in a GL
 // dependency for one small debug view. See MappingCollector for how the
-// path itself is computed (steps x heading, not typed in by hand).
+// path itself is computed (steps x heading, not typed in by hand), and
+// MappingDb.estimateApPositions for the Wi-Fi AP position estimates
+// plotted alongside it.
 public class MappingPathView extends View {
 
     private List<double[]> path = new ArrayList<>();
     private double curX = 0, curY = 0;
+    private List<MappingDb.ApEstimate> apEstimates = new ArrayList<>();
 
     private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pathPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint originPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint curPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint apPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint emptyPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
     public MappingPathView(Context ctx) {
@@ -36,6 +41,8 @@ public class MappingPathView extends View {
         originPaint.setStyle(Paint.Style.FILL);
         curPaint.setColor(0xFF57C785);
         curPaint.setStyle(Paint.Style.FILL);
+        apPaint.setColor(0xFFB57BFF);
+        apPaint.setStyle(Paint.Style.FILL);
         emptyPaint.setColor(UiKit.TEXT_SECONDARY);
         emptyPaint.setTextSize(28f);
     }
@@ -44,6 +51,11 @@ public class MappingPathView extends View {
         this.path = path != null ? path : new ArrayList<>();
         this.curX = curX;
         this.curY = curY;
+        invalidate();
+    }
+
+    public void setApEstimates(List<MappingDb.ApEstimate> apEstimates) {
+        this.apEstimates = apEstimates != null ? apEstimates : new ArrayList<>();
         invalidate();
     }
 
@@ -60,6 +72,10 @@ public class MappingPathView extends View {
         for (double[] p : path) {
             minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
             minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]);
+        }
+        for (MappingDb.ApEstimate ap : apEstimates) {
+            minX = Math.min(minX, ap.x); maxX = Math.max(maxX, ap.x);
+            minY = Math.min(minY, ap.y); maxY = Math.max(maxY, ap.y);
         }
         minX = Math.min(minX, 0); maxX = Math.max(maxX, 0);
         minY = Math.min(minY, 0); maxY = Math.max(maxY, 0);
@@ -101,11 +117,26 @@ public class MappingPathView extends View {
             first = false;
         }
 
+        for (MappingDb.ApEstimate ap : apEstimates) {
+            float[] s = project(ap.x, ap.y, cx, cy, scale, midX, midY);
+            drawDiamond(canvas, s[0], s[1], UiKit.dp(6), apPaint);
+        }
+
         float[] origin = project(0, 0, cx, cy, scale, midX, midY);
         canvas.drawCircle(origin[0], origin[1], UiKit.dp(5), originPaint);
 
         float[] cur = project(curX, curY, cx, cy, scale, midX, midY);
         canvas.drawCircle(cur[0], cur[1], UiKit.dp(7), curPaint);
+    }
+
+    private void drawDiamond(Canvas canvas, float cx, float cy, float r, Paint paint) {
+        Path diamond = new Path();
+        diamond.moveTo(cx, cy - r);
+        diamond.lineTo(cx + r, cy);
+        diamond.lineTo(cx, cy + r);
+        diamond.lineTo(cx - r, cy);
+        diamond.close();
+        canvas.drawPath(diamond, paint);
     }
 
     private float[] project(double x, double y, float cx, float cy, double scale, double midX, double midY) {

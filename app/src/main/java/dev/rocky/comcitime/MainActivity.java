@@ -1696,6 +1696,11 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams pathLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220));
         pathLp.topMargin = dp(8);
         pathCard.addView(mappingPathView, pathLp);
+        TextView pathLegend = new TextView(this);
+        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치");
+        UiKit.styleCaption(pathLegend);
+        pathLegend.setPadding(0, dp(4), 0, 0);
+        pathCard.addView(pathLegend);
         section.addView(pathCard, cardLp());
 
         LinearLayout rawCard = card();
@@ -1839,12 +1844,14 @@ public class MainActivity extends Activity {
     // instead of every fast tick like updateMappingLiveViews() below.
     private void refreshMappingPathView() {
         if (mappingPathView == null) return;
+        MappingDb mappingDb = new MappingDb(this);
+        mappingPathView.setApEstimates(mappingDb.estimateApPositions(3, 30));
         MappingCollector running = MappingService.getRunningCollector();
         if (running == null) {
             mappingPathView.setPath(new ArrayList<>(), 0, 0);
             return;
         }
-        List<double[]> path = new MappingDb(this).recentPath(300);
+        List<double[]> path = mappingDb.recentPath(300);
         mappingPathView.setPath(path, running.getPosX(), running.getPosY());
     }
 
