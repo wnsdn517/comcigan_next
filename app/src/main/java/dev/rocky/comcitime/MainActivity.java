@@ -84,6 +84,7 @@ public class MainActivity extends Activity {
     private EditText mappingFloorInput, mappingLabelInput, strideLengthInput;
     private OrientationGizmoView mappingGizmoView;
     private MappingPathView mappingPathView;
+    private SparklineView accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph;
     private Runnable pendingMappingStart;
     private static final int REQ_MAPPING_PERMS = 2;
     private final Handler mappingTickHandler = new Handler();
@@ -1680,6 +1681,20 @@ public class MainActivity extends Activity {
         pathCard.addView(mappingPathView, pathLp);
         section.addView(pathCard, cardLp());
 
+        LinearLayout rawCard = card();
+        rawCard.addView(eyebrow("실제 원시 센서 데이터 (변화 그래프)"));
+        accelGraph = new SparklineView(this, "🚶 가속도계", " m/s²", 0xFF5B8CFF);
+        gyroGraph = new SparklineView(this, "🧭 자이로스코프", " rad/s", 0xFFFF7A7A);
+        magGraph = new SparklineView(this, "🧭 자기장 센서", " μT", 0xFF57C785);
+        pressureGraph = new SparklineView(this, "📏 기압계", " hPa", 0xFFF2B94C);
+        rssiGraph = new SparklineView(this, "📶 Wi-Fi 최강 신호", " dBm", 0xFFB57BFF);
+        for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph}) {
+            LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
+            glp.topMargin = dp(6);
+            rawCard.addView(gv, glp);
+        }
+        section.addView(rawCard, cardLp());
+
         LinearLayout strideCard = card();
         strideCard.addView(eyebrow("원점 기준 이동 거리 계산"));
         TextView strideHint = new TextView(this);
@@ -1834,6 +1849,9 @@ public class MainActivity extends Activity {
             mappingSensorText.setText("수집 중이 아니에요.");
             if (mappingGizmoView != null) mappingGizmoView.setOrientation(0, 0, 0);
             if (mappingPathView != null) mappingPathView.setPath(new ArrayList<>(), 0, 0);
+            for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph}) {
+                if (gv != null) gv.setData(new float[0], 0);
+            }
             return;
         }
         float heading = running.getHeadingDeg();
@@ -1843,14 +1861,27 @@ public class MainActivity extends Activity {
         double x = running.getPosX();
         double y = running.getPosY();
         double dist = Math.sqrt(x * x + y * y);
+        String gps = Double.isNaN(running.getLastLat()) ? "미확보"
+                : String.format(Locale.KOREA, "%.5f, %.5f", running.getLastLat(), running.getLastLon());
         mappingSensorText.setText(String.format(Locale.KOREA,
-                "방위(heading) %.0f°  기울기(pitch) %.0f°  좌우기울기(roll) %.0f°\n걸음 수 %d  위치 (%.1f, %.1f) m  원점에서 %.1fm",
-                heading, pitch, roll, steps, x, y, dist));
+                "방위(heading) %.0f°  기울기(pitch) %.0f°  좌우기울기(roll) %.0f°\n" +
+                        "걸음 수 %d  위치 (%.1f, %.1f) m  원점에서 %.1fm\n" +
+                        "추정 층 변화 %+d층  화면 방향 %d°  GPS %s",
+                heading, pitch, roll, steps, x, y, dist,
+                running.getEstimatedFloorDelta(), running.getScreenRotationDeg(), gps));
         if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
         if (mappingPathView != null) {
             List<double[]> path = new MappingDb(this).recentPath(300);
             mappingPathView.setPath(path, x, y);
         }
+
+        running.pushRawHistorySample();
+        int histCount = running.getHistoryCount();
+        if (accelGraph != null) accelGraph.setData(running.getAccelHistory(), histCount);
+        if (gyroGraph != null) gyroGraph.setData(running.getGyroHistory(), histCount);
+        if (magGraph != null) magGraph.setData(running.getMagHistory(), histCount);
+        if (pressureGraph != null) pressureGraph.setData(running.getPressureHistory(), histCount);
+        if (rssiGraph != null) rssiGraph.setData(running.getRssiHistory(), histCount);
     }
 
     // Shows each Wi-Fi access point's estimated position (RSSI-weighted
