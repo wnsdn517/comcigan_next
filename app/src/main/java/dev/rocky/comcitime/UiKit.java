@@ -12,12 +12,15 @@ import android.widget.TextView;
 
 // Small, deliberate design system for this app: a dim "blackboard navy"
 // background with a single chalk-yellow accent, reserved coral for
-// schedule-change alerts only. Everything else stays quiet.
+// schedule-change alerts only. Visual language leans simple/retro on
+// purpose -- squarer corners, visible chunky borders instead of soft
+// blended glow, flat blocks instead of shadows, snappier ease-out motion
+// instead of springy overshoot -- rather than a glossy "modern SaaS" look.
 public class UiKit {
     public static final int BG = 0xFF14161D;
     public static final int SURFACE = 0xFF1E212B;
     public static final int SURFACE_ALT = 0xFF262A36;
-    public static final int BORDER = 0xFF2E3341;
+    public static final int BORDER = 0xFF3A4052;
     public static final int TEXT_PRIMARY = 0xFFEDEEF3;
     public static final int TEXT_SECONDARY = 0xFF8B90A0;
     public static final int ACCENT = 0xFFF2B94C;
@@ -27,41 +30,43 @@ public class UiKit {
     public static GradientDrawable card() {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE);
-        d.setCornerRadius(dp(14));
-        d.setStroke(dp1(), BORDER);
+        d.setCornerRadius(dp(8));
+        d.setStroke(dp2(), BORDER);
         return d;
     }
 
     public static GradientDrawable inputBg() {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE_ALT);
-        d.setCornerRadius(dp(10));
-        d.setStroke(dp1(), BORDER);
+        d.setCornerRadius(dp(6));
+        d.setStroke(dp2(), BORDER);
         return d;
     }
 
     public static GradientDrawable pillOutline() {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE_ALT);
-        d.setCornerRadius(dp(999));
-        d.setStroke(dp1(), BORDER);
+        d.setCornerRadius(dp(6));
+        d.setStroke(dp2(), BORDER);
         return d;
     }
 
     public static GradientDrawable pillFilled(int color) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(color);
-        d.setCornerRadius(dp(999));
+        d.setCornerRadius(dp(6));
         return d;
     }
 
     public static StateListDrawable primaryButtonBg() {
         GradientDrawable normal = new GradientDrawable();
         normal.setColor(ACCENT);
-        normal.setCornerRadius(dp(10));
+        normal.setCornerRadius(dp(6));
+        normal.setStroke(dp2(), darken(ACCENT, 0.7f));
         GradientDrawable pressed = new GradientDrawable();
         pressed.setColor(darken(ACCENT, 0.85f));
-        pressed.setCornerRadius(dp(10));
+        pressed.setCornerRadius(dp(6));
+        pressed.setStroke(dp2(), darken(ACCENT, 0.7f));
         StateListDrawable sld = new StateListDrawable();
         sld.addState(new int[]{android.R.attr.state_pressed}, pressed);
         sld.addState(new int[]{}, normal);
@@ -71,12 +76,12 @@ public class UiKit {
     public static StateListDrawable secondaryButtonBg() {
         GradientDrawable normal = new GradientDrawable();
         normal.setColor(SURFACE_ALT);
-        normal.setStroke(dp1(), BORDER);
-        normal.setCornerRadius(dp(10));
+        normal.setStroke(dp2(), BORDER);
+        normal.setCornerRadius(dp(6));
         GradientDrawable pressed = new GradientDrawable();
         pressed.setColor(darken(SURFACE_ALT, 0.8f));
-        pressed.setStroke(dp1(), BORDER);
-        pressed.setCornerRadius(dp(10));
+        pressed.setStroke(dp2(), BORDER);
+        pressed.setCornerRadius(dp(6));
         StateListDrawable sld = new StateListDrawable();
         sld.addState(new int[]{android.R.attr.state_pressed}, pressed);
         sld.addState(new int[]{}, normal);
@@ -162,7 +167,7 @@ public class UiKit {
             View swatch = new View(ctx);
             GradientDrawable bg = new GradientDrawable();
             bg.setColor(color);
-            bg.setCornerRadius(dp(10));
+            bg.setCornerRadius(dp(6));
             swatch.setBackground(bg);
             android.widget.GridLayout.LayoutParams lp = new android.widget.GridLayout.LayoutParams();
             lp.width = dp(56);
@@ -184,18 +189,18 @@ public class UiKit {
         dialog.show();
     }
 
-    // ---------- juicy micro-animations ----------
+    // ---------- simple, snappy micro-animations (no spring/overshoot) ----------
     public static void attachBouncyPress(View v) {
         v.setOnTouchListener((view, event) -> {
             switch (event.getActionMasked()) {
                 case android.view.MotionEvent.ACTION_DOWN:
-                    view.animate().scaleX(0.93f).scaleY(0.93f).setDuration(90)
+                    view.animate().scaleX(0.95f).scaleY(0.95f).setDuration(70)
                             .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
                     break;
                 case android.view.MotionEvent.ACTION_UP:
                 case android.view.MotionEvent.ACTION_CANCEL:
-                    view.animate().scaleX(1f).scaleY(1f).setDuration(220)
-                            .setInterpolator(new android.view.animation.OvershootInterpolator(6f)).start();
+                    view.animate().scaleX(1f).scaleY(1f).setDuration(100)
+                            .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
                     break;
             }
             return false; // don't consume -- let the real click listener still fire
@@ -203,29 +208,27 @@ public class UiKit {
     }
 
     public static void popIn(View v) {
-        v.setScaleX(0.85f); v.setScaleY(0.85f); v.setAlpha(0f);
-        v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(260)
-                .setInterpolator(new android.view.animation.OvershootInterpolator(3f)).start();
+        v.setAlpha(0f);
+        v.animate().alpha(1f).setDuration(140)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
     }
 
     public static void crossFade(View outView, View inView, Runnable onSwapped) {
-        outView.animate().alpha(0f).scaleX(0.96f).scaleY(0.96f).setDuration(140)
+        outView.animate().alpha(0f).setDuration(100)
                 .setInterpolator(new android.view.animation.AccelerateInterpolator())
                 .withEndAction(() -> {
                     onSwapped.run();
                     inView.setAlpha(0f);
-                    inView.setScaleX(0.96f);
-                    inView.setScaleY(0.96f);
-                    inView.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(220)
-                            .setInterpolator(new android.view.animation.OvershootInterpolator(2f)).start();
+                    inView.animate().alpha(1f).setDuration(140)
+                            .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
                 }).start();
     }
 
     public static void slideAndFadeIn(View v, float fromDx) {
         v.setTranslationX(fromDx);
         v.setAlpha(0f);
-        v.animate().translationX(0f).alpha(1f).setDuration(260)
-                .setInterpolator(new android.view.animation.OvershootInterpolator(1.5f)).start();
+        v.animate().translationX(0f).alpha(1f).setDuration(160)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
     }
 
     private static float density = 2.75f; // overwritten by init()
@@ -239,5 +242,5 @@ public class UiKit {
     }
 
     public static int dp(int v) { return (int) (v * density); }
-    private static int dp1() { return Math.max(1, (int) (1 * density)); }
+    private static int dp2() { return Math.max(2, (int) (2 * density)); }
 }

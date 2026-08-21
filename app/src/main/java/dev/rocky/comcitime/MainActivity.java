@@ -17,7 +17,6 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.animation.OvershootInterpolator;
 import android.widget.ArrayAdapter;
 import android.widget.AutoCompleteTextView;
 import android.widget.Button;
@@ -87,9 +86,6 @@ public class MainActivity extends Activity {
     private static final int REQ_MAPPING_PERMS = 2;
 
     private FrameLayout onboardingOverlay;
-    private FrameLayout teacherPreviewOverlay;
-    private LinearLayout teacherPreviewContent;
-    private TextView teacherPreviewTitle;
 
     private static final String[] DOW_SHORT = {"", "월", "화", "수", "목", "금"};
 
@@ -129,7 +125,6 @@ public class MainActivity extends Activity {
         outerCol.addView(buildBottomNav());
 
         rootFrame.addView(outerCol, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        rootFrame.addView(buildTeacherPreviewOverlay(), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         rootFrame.addView(buildOnboardingOverlay(), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         setContentView(rootFrame);
@@ -362,7 +357,7 @@ public class MainActivity extends Activity {
         root.addView(headerRow);
 
         TextView hint = new TextView(this);
-        hint.setText("길게 누르면 선생님 시간표 보기 · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
+        hint.setText("길게 눌러 선생님 시간표 보기 (위로 밀면 고정) · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
         hint.setTextColor(UiKit.TEXT_SECONDARY);
         hint.setTextSize(11);
         hint.setPadding(dp(20), 0, dp(20), dp(10));
@@ -465,7 +460,7 @@ public class MainActivity extends Activity {
         TextView live = new TextView(this);
         live.setText("🔴 지금 " + current.period + "교시 · " + formatRemaining(remainingMinutes) + " 남음");
         live.setTextColor(UiKit.ACCENT);
-        live.setTypeface(Typeface.DEFAULT_BOLD);
+        live.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         live.setTextSize(12);
         nowPanel.addView(live);
 
@@ -502,7 +497,7 @@ public class MainActivity extends Activity {
         TextView live = new TextView(this);
         live.setText(next != null ? "☕ 쉬는시간 · " + formatRemaining(remainingMinutes) + " 후 다음 수업" : "☕ 쉬는시간");
         live.setTextColor(UiKit.TEXT_SECONDARY);
-        live.setTypeface(Typeface.DEFAULT_BOLD);
+        live.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         live.setTextSize(12);
         nowPanel.addView(live);
 
@@ -667,6 +662,7 @@ public class MainActivity extends Activity {
         sectionCard.addView(ws.grid, matchWrap());
         ws.card = sectionCard;
         attachCardSwipeGesture(sectionCard);
+        attachGridTouch(ws);
 
         weekSections.add(insertIndex, ws);
         weekSectionsContainer.addView(sectionCard, insertIndex);
@@ -742,6 +738,7 @@ public class MainActivity extends Activity {
         TextView periodCell = new TextView(this);
         periodCell.setText(String.valueOf(p));
         periodCell.setTextColor(UiKit.TEXT_SECONDARY);
+        periodCell.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         periodCell.setTextSize(11);
         periodCell.setGravity(Gravity.CENTER);
         periodCell.setWidth(dp(20));
@@ -777,75 +774,143 @@ public class MainActivity extends Activity {
             dot.setGravity(Gravity.CENTER);
             cell.addView(dot);
         }
-        attachCellTouch(cell, e, date, period);
+        UiKit.attachBouncyPress(cell);
         return cell;
     }
 
-    // A plain long-press (no extra drag) previews the teacher's schedule
-    // in a floating sheet and auto-locks immediately; releasing the finger
-    // commits that into the main table (see commitTeacherViewInline).
-    // ACTION_MOVE only cancels a not-yet-fired long-press when the finger
-    // has clearly moved (e.g. the user is scrolling instead), so it
-    // doesn't fire on top of a scroll gesture.
-    private void attachCellTouch(View cell, Timetable.PeriodEntry e, String date, int period) {
+    // Long-press (~420ms hold, no drag needed to start it) swaps THIS grid
+    // live to the teacher's schedule while the finger is still down;
+    // dragging up locks it in, releasing without dragging up reverts back
+    // to the class view. Tapping any cell while a teacher's schedule is
+    // showing unlocks it.
+    //
+    // The listener lives on ws.grid itself (not on individual cells) so
+    // that swapping the grid's contents mid-gesture doesn't cancel the
+    // touch: rerenderAllSections() only replaces ws.grid's CHILDREN
+    // (removeAllViews + re-add), never ws.grid itself, so the view that
+    // actually owns this ongoing gesture is never detached. Attaching the
+    // gesture to individual cells (the earlier approach) broke this,
+    // because rebuilding necessarily destroyed whichever cell the finger
+    // was resting on, and Android cancels a touch stream when its target
+    // view is detached -- that's what caused the old "flashes then
+    // immediately reverts" bug. Cells still get UiKit.attachBouncyPress
+    // for tap feedback, but that listener never consumes the event (see
+    // its own comment), so everything always bubbles up here.
+    private void attachGridTouch(WeekSection ws) {
         final float[] startY = {0};
         final boolean[] longPressFired = {false};
         final boolean[] moved = {false};
+        final int[] downPeriod = {-1};
+        final int[] downDay = {-1};
+        final View[] touchedCell = {null};
         Handler handler = new Handler();
         final Runnable[] pending = new Runnable[1];
 
-        cell.setOnTouchListener((v, event) -> {
+        ws.grid.setOnTouchListener((v, event) -> {
             switch (event.getActionMasked()) {
-                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_DOWN: {
                     startY[0] = event.getRawY();
                     longPressFired[0] = false;
                     moved[0] = false;
-                    v.animate().scaleX(0.94f).scaleY(0.94f).setDuration(80).start();
-                    if (e != null && !e.teacher.isEmpty()) {
-                        String teacherName = e.teacher;
-                        pending[0] = () -> {
-                            longPressFired[0] = true;
-                            enterTeacherViewTemp(teacherName);
-                            lockTeacherView();
-                        };
-                        handler.postDelayed(pending[0], 420);
+                    int[] hit = hitTestGrid(ws.grid, event.getX(), event.getY());
+                    downPeriod[0] = hit[0];
+                    downDay[0] = hit[1];
+                    touchedCell[0] = (hit[0] > 0 && hit[1] > 0)
+                            ? ((TableRow) ws.grid.getChildAt(hit[0])).getChildAt(hit[1]) : null;
+                    if (touchedCell[0] != null) {
+                        touchedCell[0].animate().scaleX(0.94f).scaleY(0.94f).setDuration(80).start();
+                    }
+                    if (viewingTeacherName == null && downPeriod[0] > 0 && downDay[0] > 0) {
+                        Timetable.PeriodEntry entry = findClassEntry(ws, downPeriod[0], downDay[0]);
+                        if (entry != null && !entry.teacher.isEmpty()) {
+                            String teacherName = entry.teacher;
+                            pending[0] = () -> {
+                                longPressFired[0] = true;
+                                enterTeacherViewLive(teacherName);
+                            };
+                            handler.postDelayed(pending[0], 420);
+                        }
                     }
                     return true;
-                case MotionEvent.ACTION_MOVE:
+                }
+                case MotionEvent.ACTION_MOVE: {
                     float dy = startY[0] - event.getRawY();
-                    if (!longPressFired[0] && Math.abs(dy) > dp(18)) {
+                    if (longPressFired[0] && !teacherViewLocked && dy > dp(70)) {
+                        lockTeacherView();
+                    } else if (!longPressFired[0] && Math.abs(dy) > dp(18)) {
                         moved[0] = true;
                         if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     }
                     return true;
-                case MotionEvent.ACTION_UP:
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(160)
-                            .setInterpolator(new OvershootInterpolator(4f)).start();
+                }
+                case MotionEvent.ACTION_UP: {
+                    if (touchedCell[0] != null) {
+                        touchedCell[0].animate().scaleX(1f).scaleY(1f).setDuration(100)
+                                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+                    }
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     if (longPressFired[0]) {
-                        commitTeacherViewInline();
+                        if (!teacherViewLocked) exitTeacherView();
                     } else if (!moved[0]) {
                         if (viewingTeacherName != null) {
                             exitTeacherView();
-                        } else if (!date.isEmpty()) {
-                            openEventDialog(date, period, e);
+                        } else if (downPeriod[0] > 0 && downDay[0] > 0) {
+                            String date = dateForDay(ws.tt, downDay[0]);
+                            if (!date.isEmpty()) {
+                                openEventDialog(date, downPeriod[0], findClassEntry(ws, downPeriod[0], downDay[0]));
+                            }
                         }
                     }
                     return true;
-                case MotionEvent.ACTION_CANCEL:
-                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                }
+                case MotionEvent.ACTION_CANCEL: {
+                    if (touchedCell[0] != null) {
+                        touchedCell[0].animate().scaleX(1f).scaleY(1f).setDuration(120).start();
+                    }
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
-                    if (longPressFired[0]) commitTeacherViewInline();
+                    if (longPressFired[0] && !teacherViewLocked) exitTeacherView();
                     return true;
+                }
             }
             return false;
         });
     }
 
+    // Maps a raw touch point (in ws.grid's own coordinate space) to
+    // {period, dayOfWeek} by walking the already-laid-out rows/cells --
+    // valid because renderWeekSection always builds row child index i =
+    // period i, and within a row, cell child index j = day-of-week j (both
+    // header/period-number slots at index 0). Returns {-1, -1} on a miss.
+    private int[] hitTestGrid(TableLayout grid, float x, float y) {
+        for (int i = 1; i < grid.getChildCount(); i++) {
+            View rowView = grid.getChildAt(i);
+            if (y < rowView.getTop() || y >= rowView.getBottom()) continue;
+            if (!(rowView instanceof TableRow)) break;
+            TableRow row = (TableRow) rowView;
+            for (int j = 1; j < row.getChildCount(); j++) {
+                View cell = row.getChildAt(j);
+                // cell.getLeft()/getRight() are relative to the row, not the
+                // grid, so translate by the row's own offset within the grid.
+                if (x >= row.getLeft() + cell.getLeft() && x < row.getLeft() + cell.getRight()) {
+                    return new int[]{i, j};
+                }
+            }
+            break;
+        }
+        return new int[]{-1, -1};
+    }
+
+    private Timetable.PeriodEntry findClassEntry(WeekSection ws, int period, int dayOfWeek) {
+        int cn = browseClassNum > 0 ? browseClassNum : prefs.classNum();
+        for (Timetable.PeriodEntry e : ws.tt.getDaySchedule(prefs.grade(), cn, dayOfWeek)) {
+            if (e.period == period) return e;
+        }
+        return null;
+    }
+
     private View gridCellForTeacher(Timetable.TeacherPeriodEntry e) {
         LinearLayout cell = emptyCell();
         if (e != null) fillCell(cell, e.subject, e.grade + "-" + e.classNum, e.changed);
-        cell.setOnClickListener(v -> exitTeacherView());
         UiKit.attachBouncyPress(cell);
         return cell;
     }
@@ -859,7 +924,8 @@ public class MainActivity extends Activity {
         cell.setLayoutParams(lp);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(UiKit.SURFACE_ALT);
-        bg.setCornerRadius(dp(6));
+        bg.setCornerRadius(dp(4));
+        bg.setStroke(Math.max(1, dp(1)), UiKit.BORDER);
         cell.setBackground(bg);
         return cell;
     }
@@ -872,7 +938,7 @@ public class MainActivity extends Activity {
         } else {
             bg.setColor(blend(prefs.subjectColor(subject), UiKit.SURFACE, 0.72f));
         }
-        bg.setCornerRadius(dp(6));
+        bg.setCornerRadius(dp(4));
         cell.setBackground(bg);
         cell.setPadding(dp(4), dp(5), dp(4), dp(5));
 
@@ -919,82 +985,22 @@ public class MainActivity extends Activity {
         return 0xFF000000 | (r << 16) | (g << 8) | b;
     }
 
-    private FrameLayout buildTeacherPreviewOverlay() {
-        teacherPreviewOverlay = new FrameLayout(this);
-        teacherPreviewOverlay.setBackgroundColor(0xCC000000);
-        teacherPreviewOverlay.setVisibility(View.GONE);
-        teacherPreviewOverlay.setClickable(true);
-        teacherPreviewOverlay.setOnClickListener(v -> exitTeacherView());
-
-        LinearLayout sheet = new LinearLayout(this);
-        sheet.setOrientation(LinearLayout.VERTICAL);
-        sheet.setBackground(UiKit.card());
-        sheet.setPadding(dp(16), dp(16), dp(16), dp(16));
-        sheet.setClickable(true);
-        sheet.setOnClickListener(v -> {}); // swallow taps inside the sheet itself
-
-        teacherPreviewTitle = new TextView(this);
-        teacherPreviewTitle.setTextColor(UiKit.TEXT_PRIMARY);
-        teacherPreviewTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        teacherPreviewTitle.setTextSize(16);
-        sheet.addView(teacherPreviewTitle);
-
-        TextView tapHint = new TextView(this);
-        tapHint.setText("바깥을 탭하면 닫혀요");
-        tapHint.setTextColor(UiKit.TEXT_SECONDARY);
-        tapHint.setTextSize(11);
-        tapHint.setPadding(0, dp(2), 0, dp(10));
-        sheet.addView(tapHint);
-
-        ScrollView scroll = new ScrollView(this);
-        teacherPreviewContent = new LinearLayout(this);
-        teacherPreviewContent.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(teacherPreviewContent);
-        sheet.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
-
-        FrameLayout.LayoutParams sheetLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        sheetLp.gravity = Gravity.BOTTOM;
-        int m = dp(16);
-        sheetLp.setMargins(m, m, m, m);
-        teacherPreviewOverlay.addView(sheet, sheetLp);
-        return teacherPreviewOverlay;
-    }
-
-    // Shows the teacher's schedule in a SEPARATE overlay that never
-    // touches the main grid's view hierarchy -- rebuilding the grid the
-    // finger is still resting on mid-gesture was exactly what caused the
-    // "flashes then immediately reverts" bug (Android auto-cancels the
-    // touch when its view gets detached). A plain long-press is enough to
-    // trigger this and it auto-locks immediately (see attachCellTouch) --
-    // there is no separate drag-to-lock step anymore.
-    private void enterTeacherViewTemp(String teacherName) {
+    // Long-press fired: swap this AND every other section's grid to the
+    // teacher's schedule immediately, live, while the finger is still
+    // down (see attachGridTouch for why this is safe -- the touch
+    // listener lives on ws.grid, which rerenderAllSections() never
+    // detaches, only its children).
+    private void enterTeacherViewLive(String teacherName) {
         viewingTeacherName = teacherName;
         teacherViewLocked = false;
-        teacherPreviewTitle.setText(teacherName + " 선생님 시간표");
-        renderTeacherPreview(teacherName);
-        teacherPreviewOverlay.setVisibility(View.VISIBLE);
-        teacherPreviewOverlay.setAlpha(0f);
-        teacherPreviewOverlay.animate().alpha(1f).setDuration(150).start();
+        teacherModeIndicator.setText(teacherName + " 선생님 시간표 -- 위로 밀면 고정");
         teacherModeIndicator.setVisibility(View.VISIBLE);
+        rerenderAllSections();
     }
 
     private void lockTeacherView() {
         teacherViewLocked = true;
-        teacherModeIndicator.setText("\ud83d\udd12 " + viewingTeacherName + " 선생님 시간표 -- 손을 떼면 표에 적용돼요");
-    }
-
-    // Called once the finger lifts after a locked long-press. The drag
-    // gesture is over by now, so it's safe to rebuild the main grid in
-    // teacher mode in place -- doing this DURING the drag (finger still
-    // down) is what caused the old "flashes then immediately reverts" bug,
-    // since rebuilding detaches the actively-touched cell and Android
-    // cancels the gesture. The floating preview sheet stays for the live
-    // drag feedback; only the final, committed state moves into the table.
-    private void commitTeacherViewInline() {
-        teacherPreviewOverlay.animate().alpha(0f).setDuration(120)
-                .withEndAction(() -> teacherPreviewOverlay.setVisibility(View.GONE)).start();
-        rerenderAllSections();
+        teacherModeIndicator.setText("\ud83d\udd12 " + viewingTeacherName + " 선생님 시간표 고정됨 -- 탭하면 해제");
     }
 
     private void exitTeacherView() {
@@ -1002,42 +1008,7 @@ public class MainActivity extends Activity {
         viewingTeacherName = null;
         teacherViewLocked = false;
         teacherModeIndicator.setVisibility(View.GONE);
-        teacherPreviewOverlay.animate().alpha(0f).setDuration(120)
-                .withEndAction(() -> teacherPreviewOverlay.setVisibility(View.GONE)).start();
         rerenderAllSections();
-    }
-
-    private void renderTeacherPreview(String teacherName) {
-        teacherPreviewContent.removeAllViews();
-        for (WeekSection ws : weekSections) {
-            List<Timetable.TeacherPeriodEntry> all = ws.tt.getTeacherWeek(teacherName);
-            LinearLayout weekBlock = new LinearLayout(this);
-            weekBlock.setOrientation(LinearLayout.VERTICAL);
-            weekBlock.setPadding(0, dp(4), 0, dp(12));
-
-            TableLayout grid = new TableLayout(this);
-            grid.setStretchAllColumns(false);
-            for (int c = 1; c <= 5; c++) grid.setColumnStretchable(c, true);
-            TableRow header = new TableRow(this);
-            header.addView(gridHeaderCell(""));
-            for (int d = 1; d <= 5; d++) header.addView(gridHeaderCell(DOW_SHORT[d]));
-            grid.addView(header);
-
-            int maxPeriod = 1;
-            for (Timetable.TeacherPeriodEntry e : all) maxPeriod = Math.max(maxPeriod, e.period);
-            for (int p = 1; p <= maxPeriod; p++) {
-                TableRow row = new TableRow(this);
-                row.addView(periodNumCell(p));
-                for (int d = 1; d <= 5; d++) {
-                    Timetable.TeacherPeriodEntry match = null;
-                    for (Timetable.TeacherPeriodEntry e : all) if (e.period == p && e.dayOfWeek == d) { match = e; break; }
-                    row.addView(gridCellForTeacher(match));
-                }
-                grid.addView(row);
-            }
-            weekBlock.addView(grid);
-            teacherPreviewContent.addView(weekBlock);
-        }
     }
 
     private void attachCardSwipeGesture(View cardView) {
@@ -1173,8 +1144,8 @@ public class MainActivity extends Activity {
                 list.addView(row);
                 row.setTranslationX(dp(30));
                 row.setAlpha(0f);
-                row.animate().alpha(1f).translationX(0f).setStartDelay(i * 40L).setDuration(280)
-                        .setInterpolator(new OvershootInterpolator(2f)).start();
+                row.animate().alpha(1f).translationX(0f).setStartDelay(i * 40L).setDuration(160)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
             }
         }
         scroll.addView(list);
@@ -1957,7 +1928,6 @@ public class MainActivity extends Activity {
         c.setOrientation(LinearLayout.VERTICAL);
         c.setBackground(UiKit.card());
         c.setPadding(dp(14), dp(14), dp(14), dp(14));
-        c.setElevation(dp(2));
         return c;
     }
 
