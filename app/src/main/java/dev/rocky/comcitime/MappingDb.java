@@ -175,6 +175,23 @@ public class MappingDb extends SQLiteOpenHelper {
         return out;
     }
 
+    // Chronological (x, y) trail from the most recent motion samples, for
+    // the Settings 3D path drawing. Small on-demand read, same reasoning
+    // as estimateApPositions() above.
+    public List<double[]> recentPath(int limit) {
+        List<double[]> out = new ArrayList<>();
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor cur = db.rawQuery(
+                "SELECT x, y FROM motion_samples ORDER BY id DESC LIMIT ?",
+                new String[]{String.valueOf(limit)})) {
+            while (cur.moveToNext()) {
+                out.add(new double[]{cur.getDouble(0), cur.getDouble(1)});
+            }
+        }
+        java.util.Collections.reverse(out);
+        return out;
+    }
+
     public List<String> recentWaypoints(long sessionId, int limit) {
         List<String> out = new ArrayList<>();
         SQLiteDatabase db = getReadableDatabase();

@@ -79,11 +79,15 @@ public class MainActivity extends Activity {
     private TextView mealStatusText;
     private LinearLayout mealContent;
 
-    private TextView mappingStatusText, mappingCountsText;
+    private TextView mappingStatusText, mappingCountsText, mappingSensorText;
     private Button mappingGrantBtn;
-    private EditText mappingFloorInput, mappingLabelInput;
+    private EditText mappingFloorInput, mappingLabelInput, strideLengthInput;
+    private OrientationGizmoView mappingGizmoView;
+    private MappingPathView mappingPathView;
     private Runnable pendingMappingStart;
     private static final int REQ_MAPPING_PERMS = 2;
+    private final Handler mappingTickHandler = new Handler();
+    private Runnable mappingTick;
 
     private FrameLayout onboardingOverlay;
 
@@ -222,9 +226,14 @@ public class MainActivity extends Activity {
             tabButtons[i].setBackground(active ? activeTabBg() : null);
         }
         nowPanelHandler.removeCallbacksAndMessages(null);
+        mappingTickHandler.removeCallbacksAndMessages(null);
         if (index == 0) { loadAllWeeks(); tickNowPanel(); }
         if (index == 1) refreshMeal();
-        if (index == 2) { refreshColorsList(); refreshMappingStatus(); }
+        if (index == 2) {
+            refreshColorsList();
+            refreshMappingStatus();
+            if (accMapping != null && accMapping.getVisibility() == View.VISIBLE) startMappingTick();
+        }
     }
 
     private FrameLayout buildOnboardingOverlay() {
@@ -1333,8 +1342,25 @@ public class MainActivity extends Activity {
                 content.setVisibility(View.VISIBLE);
                 UiKit.popIn(content);
             }
+            mappingTickHandler.removeCallbacksAndMessages(null);
+            if (accMapping != null && accMapping.getVisibility() == View.VISIBLE) startMappingTick();
         });
         return b;
+    }
+
+    // Keeps the live sensor readout / 3D gizmo / path drawing updating
+    // roughly once a second, but only while the mapping accordion section
+    // is actually visible -- torn down on every tab switch or accordion
+    // toggle above so it's never ticking in the background for no reason.
+    private void startMappingTick() {
+        if (mappingTick == null) {
+            mappingTick = () -> {
+                refreshMappingStatus();
+                mappingTickHandler.postDelayed(mappingTick, 1000);
+            };
+        }
+        mappingTickHandler.removeCallbacks(mappingTick);
+        mappingTickHandler.post(mappingTick);
     }
 
     private LinearLayout buildSchoolSection() {
@@ -1631,6 +1657,85 @@ public class MainActivity extends Activity {
         statusCard.addView(mappingGrantBtn, grantLp);
         section.addView(statusCard, cardLp());
 
+        LinearLayout sensorCard = card();
+        sensorCard.addView(eyebrow("실시간 센서 값 (3D)"));
+        mappingGizmoView = new OrientationGizmoView(this);
+        LinearLayout.LayoutParams gizmoLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(160));
+        gizmoLp.topMargin = dp(8);
+        sensorCard.addView(mappingGizmoView, gizmoLp);
+        mappingSensorText = new TextView(this);
+        UiKit.styleCaption(mappingSensorText);
+        mappingSensorText.setTypeface(Typeface.MONOSPACE);
+        mappingSensorText.setText("수집 중이 아니에요.");
+        LinearLayout.LayoutParams sensorTextLp = matchWrap();
+        sensorTextLp.topMargin = dp(8);
+        sensorCard.addView(mappingSensorText, sensorTextLp);
+        section.addView(sensorCard, cardLp());
+
+        LinearLayout pathCard = card();
+        pathCard.addView(eyebrow("이동 경로 (3D 평면도)"));
+        mappingPathView = new MappingPathView(this);
+        LinearLayout.LayoutParams pathLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220));
+        pathLp.topMargin = dp(8);
+        pathCard.addView(mappingPathView, pathLp);
+        section.addView(pathCard, cardLp());
+
+        LinearLayout strideCard = card();
+        strideCard.addView(eyebrow("원점 기준 이동 거리 계산"));
+        TextView strideHint = new TextView(this);
+        strideHint.setText("걸음 수 × 보폭으로 위치를 추정해요. 보폭을 실제에 맞게 조정하면 정확도가 올라가요.");
+        UiKit.styleCaption(strideHint);
+        strideHint.setPadding(0, dp(2), 0, 0);
+        strideCard.addView(strideHint);
+        LinearLayout strideRow = new LinearLayout(this);
+        strideRow.setOrientation(LinearLayout.HORIZONTAL);
+        strideRow.setPadding(0, dp(8), 0, 0);
+        strideLengthInput = new EditText(this);
+        strideLengthInput.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        strideLengthInput.setText(String.valueOf(prefs.strideLengthM()));
+        UiKit.styleInput(strideLengthInput);
+        LinearLayout.LayoutParams strideInputLp = weightedWrap();
+        strideInputLp.rightMargin = dp(8);
+        strideRow.addView(strideLengthInput, strideInputLp);
+        Button strideSaveBtn = new Button(this);
+        strideSaveBtn.setText("m 저장");
+        UiKit.styleSecondaryButton(strideSaveBtn);
+        strideSaveBtn.setOnClickListener(v -> {
+            try {
+                float meters = Float.parseFloat(strideLengthInput.getText().toString().trim());
+                if (meters <= 0 || meters > 3) {
+                    Toast.makeText(this, "0~3m 사이로 입력해주세요.", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                prefs.setStrideLengthM(meters);
+                MappingCollector running = MappingService.getRunningCollector();
+                if (running != null) running.setStrideLengthM(meters);
+                Toast.makeText(this, "보폭을 " + meters + "m로 저장했어요.", Toast.LENGTH_SHORT).show();
+            } catch (NumberFormatException e) {
+                Toast.makeText(this, "숫자를 입력해주세요.", Toast.LENGTH_SHORT).show();
+            }
+        });
+        strideRow.addView(strideSaveBtn);
+        strideCard.addView(strideRow);
+        Button resetOriginBtn = new Button(this);
+        resetOriginBtn.setText("원점 재설정 (현재 위치를 0,0으로)");
+        resetOriginBtn.setTextSize(12);
+        UiKit.styleSecondaryButton(resetOriginBtn);
+        LinearLayout.LayoutParams resetLp = matchWrap();
+        resetLp.topMargin = dp(8);
+        resetOriginBtn.setOnClickListener(v -> {
+            MappingCollector running = MappingService.getRunningCollector();
+            if (running == null) {
+                Toast.makeText(this, "아직 백그라운드 수집이 시작되지 않았어요.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            running.resetOrigin();
+            Toast.makeText(this, "원점을 재설정했어요.", Toast.LENGTH_SHORT).show();
+            refreshMappingStatus();
+        });
+        strideCard.addView(resetOriginBtn, resetLp);
+        section.addView(strideCard, cardLp());
+
         LinearLayout waypointCard = card();
         waypointCard.addView(eyebrow("위치 이름표 (선택)"));
         TextView waypointHint = new TextView(this);
@@ -1715,6 +1820,37 @@ public class MainActivity extends Activity {
         }
         MappingDb.Counts c = new MappingDb(this).counts();
         mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans + "개 · 이름표 " + c.waypoints + "개");
+        updateMappingSensorViews();
+    }
+
+    // Pulls the current heading/pitch/roll/step/position readout straight
+    // from the live collector (in-memory, no DB hit) and re-projects the
+    // 3D gizmo + path drawing from it. The path polyline itself still
+    // needs a small DB read for history beyond just the current point.
+    private void updateMappingSensorViews() {
+        if (mappingSensorText == null) return;
+        MappingCollector running = MappingService.getRunningCollector();
+        if (running == null) {
+            mappingSensorText.setText("수집 중이 아니에요.");
+            if (mappingGizmoView != null) mappingGizmoView.setOrientation(0, 0, 0);
+            if (mappingPathView != null) mappingPathView.setPath(new ArrayList<>(), 0, 0);
+            return;
+        }
+        float heading = running.getHeadingDeg();
+        float pitch = running.getPitchDeg();
+        float roll = running.getRollDeg();
+        int steps = running.getStepCount();
+        double x = running.getPosX();
+        double y = running.getPosY();
+        double dist = Math.sqrt(x * x + y * y);
+        mappingSensorText.setText(String.format(Locale.KOREA,
+                "방위(heading) %.0f°  기울기(pitch) %.0f°  좌우기울기(roll) %.0f°\n걸음 수 %d  위치 (%.1f, %.1f) m  원점에서 %.1fm",
+                heading, pitch, roll, steps, x, y, dist));
+        if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
+        if (mappingPathView != null) {
+            List<double[]> path = new MappingDb(this).recentPath(300);
+            mappingPathView.setPath(path, x, y);
+        }
     }
 
     // Shows each Wi-Fi access point's estimated position (RSSI-weighted

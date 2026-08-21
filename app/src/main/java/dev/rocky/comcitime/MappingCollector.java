@@ -33,11 +33,6 @@ public class MappingCollector {
     // so requestScan() doesn't silently get dropped by the platform.
     private static final long SCAN_INTERVAL_MS = 30_000;
 
-    // Average adult stride length in meters, used to turn a step count into
-    // a distance for dead reckoning. Rough on purpose -- good enough to
-    // build a walkable trajectory without any manual position input.
-    private static final double STEP_LENGTH_M = 0.75;
-
     private final Context ctx;
     private final MappingDb db;
     private final WifiManager wifiManager;
@@ -59,6 +54,12 @@ public class MappingCollector {
     private final float[] rotationMatrix = new float[9];
     private final float[] orientation = new float[3];
 
+    // Stride length in meters, used to turn a step count into a distance
+    // for dead reckoning. User-calibratable in Settings (Prefs.strideLengthM())
+    // since actual stride varies by person; setStrideLengthM() applies the
+    // change immediately to whichever session is currently running.
+    private double strideLengthM;
+
     private final BroadcastReceiver scanReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -79,8 +80,8 @@ public class MappingCollector {
             } else if (event.sensor.getType() == Sensor.TYPE_STEP_DETECTOR) {
                 stepCount++;
                 double rad = Math.toRadians(headingDeg);
-                posX += STEP_LENGTH_M * Math.sin(rad);
-                posY += STEP_LENGTH_M * Math.cos(rad);
+                posX += strideLengthM * Math.sin(rad);
+                posY += strideLengthM * Math.cos(rad);
                 recordMotionSample();
             }
         }
@@ -103,6 +104,7 @@ public class MappingCollector {
         this.db = new MappingDb(this.ctx);
         this.wifiManager = (WifiManager) this.ctx.getSystemService(Context.WIFI_SERVICE);
         this.sensorManager = (SensorManager) this.ctx.getSystemService(Context.SENSOR_SERVICE);
+        this.strideLengthM = new Prefs(this.ctx).strideLengthM();
     }
 
     public void setListener(Listener l) {
@@ -111,6 +113,26 @@ public class MappingCollector {
 
     public boolean isRunning() {
         return running;
+    }
+
+    public void setStrideLengthM(double meters) {
+        this.strideLengthM = meters;
+    }
+
+    public float getHeadingDeg() { return headingDeg; }
+    public float getPitchDeg() { return pitchDeg; }
+    public float getRollDeg() { return rollDeg; }
+    public int getStepCount() { return stepCount; }
+    public double getPosX() { return posX; }
+    public double getPosY() { return posY; }
+
+    // Re-zeroes the dead-reckoning position so "distance from origin"
+    // starts counting from wherever the phone is right now, instead of
+    // from session start -- lets Settings offer a reset without having to
+    // stop/restart the whole background service.
+    public void resetOrigin() {
+        posX = 0;
+        posY = 0;
     }
 
     public void start() {

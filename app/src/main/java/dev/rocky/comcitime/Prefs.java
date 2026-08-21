@@ -128,6 +128,12 @@ public class Prefs {
     public boolean mappingConsentDone() { return sp.getBoolean("mappingConsentDone", false); }
     public void setMappingConsentDone(boolean v) { sp.edit().putBoolean("mappingConsentDone", v).apply(); }
 
+    // Stride length used to turn a step count into a dead-reckoned
+    // distance from the origin. Actual stride varies by person, so this
+    // is user-calibratable in Settings rather than a fixed constant.
+    public float strideLengthM() { return sp.getFloat("mappingStrideLengthM", 0.75f); }
+    public void setStrideLengthM(float meters) { sp.edit().putFloat("mappingStrideLengthM", meters).apply(); }
+
     // ---------- NEIS (optional meal info) ----------
     public String neisApiKey() { return sp.getString("neisKey", ""); }
     public void setNeisApiKey(String key) { sp.edit().putString("neisKey", key).apply(); }
