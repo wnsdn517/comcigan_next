@@ -1349,15 +1349,32 @@ public class MainActivity extends Activity {
         return b;
     }
 
-    // Keeps the live sensor readout / 3D gizmo / path drawing updating
-    // roughly once a second, but only while the mapping accordion section
-    // is actually visible -- torn down on every tab switch or accordion
+    // Keeps the live sensor readout / 3D gizmo / raw-data graphs updating
+    // at MAPPING_TICK_MS, but only while the mapping accordion section is
+    // actually visible -- torn down on every tab switch or accordion
     // toggle above so it's never ticking in the background for no reason.
+    // The DB-backed bits (status/counts/path drawing) only need a fraction
+    // of that rate: querying SQLite on the main thread every ~300ms would
+    // risk visible jank, so those refresh every MAPPING_SLOW_TICKS ticks
+    // instead, while everything else here reads straight off the live
+    // MappingCollector's in-memory fields.
+    private static final long MAPPING_TICK_MS = 300;
+    private static final int MAPPING_SLOW_TICKS = 7; // ~every 2.1s
+
     private void startMappingTick() {
         if (mappingTick == null) {
-            mappingTick = () -> {
-                refreshMappingStatus();
-                mappingTickHandler.postDelayed(mappingTick, 1000);
+            mappingTick = new Runnable() {
+                int tickCount = 0;
+                @Override
+                public void run() {
+                    if (tickCount % MAPPING_SLOW_TICKS == 0) {
+                        refreshMappingStatus();
+                    } else {
+                        updateMappingLiveViews();
+                    }
+                    tickCount++;
+                    mappingTickHandler.postDelayed(this, MAPPING_TICK_MS);
+                }
             };
         }
         mappingTickHandler.removeCallbacks(mappingTick);
@@ -1814,21 +1831,35 @@ public class MainActivity extends Activity {
         int fingerprints = mappingDb.fingerprintCount();
         mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans
                 + "개 · 지문(위치별 스캔) " + fingerprints + "개 · 이름표 " + c.waypoints + "개");
-        updateMappingSensorViews();
+        updateMappingLiveViews();
+        refreshMappingPathView();
     }
 
-    // Pulls the current heading/pitch/roll/step/position readout straight
-    // from the live collector (in-memory, no DB hit) and re-projects the
-    // 3D gizmo + path drawing from it. The path polyline itself still
-    // needs a small DB read for history beyond just the current point.
-    private void updateMappingSensorViews() {
+    // DB-backed, so only called from the slow tick (see MAPPING_SLOW_TICKS)
+    // instead of every fast tick like updateMappingLiveViews() below.
+    private void refreshMappingPathView() {
+        if (mappingPathView == null) return;
+        MappingCollector running = MappingService.getRunningCollector();
+        if (running == null) {
+            mappingPathView.setPath(new ArrayList<>(), 0, 0);
+            return;
+        }
+        List<double[]> path = new MappingDb(this).recentPath(300);
+        mappingPathView.setPath(path, running.getPosX(), running.getPosY());
+    }
+
+    // Pulls the current heading/pitch/roll/step/position readout, 3D
+    // gizmo, and raw-data graphs straight from the live collector's
+    // in-memory fields -- no DB hit, so this is cheap enough to call at
+    // MAPPING_TICK_MS. The path drawing needs actual history from the DB;
+    // see refreshMappingPathView() above for that slower-cadence piece.
+    private void updateMappingLiveViews() {
         if (mappingSensorText == null) return;
         MappingCollector running = MappingService.getRunningCollector();
         if (running == null) {
             mappingSensorText.setText("수집 중이 아니에요.");
             if (mappingStrideText != null) mappingStrideText.setText("");
             if (mappingGizmoView != null) mappingGizmoView.setOrientation(0, 0, 0);
-            if (mappingPathView != null) mappingPathView.setPath(new ArrayList<>(), 0, 0);
             for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph}) {
                 if (gv != null) gv.setData(new float[0], 0);
             }
@@ -1850,10 +1881,6 @@ public class MainActivity extends Activity {
                 heading, pitch, roll, steps, x, y, running.getPositionUncertaintyM(), dist,
                 running.getEstimatedFloorDelta(), running.getScreenRotationDeg(), gps));
         if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
-        if (mappingPathView != null) {
-            List<double[]> path = new MappingDb(this).recentPath(300);
-            mappingPathView.setPath(path, x, y);
-        }
         if (mappingStrideText != null) {
             mappingStrideText.setText(String.format(Locale.KOREA,
                     "최근 걸음 보폭(자동 추정) %.2fm  ·  방향 소스: 자이로 적분",

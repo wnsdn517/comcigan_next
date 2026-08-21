@@ -40,10 +40,12 @@ import java.util.concurrent.Executors;
 //    Indoors, magnetic fields are heavily distorted by rebar/wiring/metal
 //    furniture, so a compass heading can be badly wrong right where this
 //    matters most. Instead, direction is tracked by integrating the raw
-//    gyroscope's yaw rate (gyroYawDeg below), bootstrapped once from the
-//    fused heading at startup -- immune to magnetic interference, at the
-//    cost of slow drift, which the Wi-Fi fingerprint correction below
-//    keeps in check.
+//    gyroscope's yaw rate (gyroYawDeg below), only softly pulled toward
+//    the fused heading a couple percent per reading (HEADING_COMPASS_PULL)
+//    -- immune to any single bad magnetometer reading, but still bounded
+//    so per-sample gyro bias can't compound into unlimited drift over a
+//    long walk, with the Wi-Fi fingerprint correction below as a second
+//    line of defense on top of that.
 //  - A fixed, user-entered stride length, for step distance. Actual
 //    stride varies with walking speed and isn't something most people
 //    know precisely. Instead each step's length is estimated from that
@@ -76,9 +78,10 @@ public class MappingCollector {
     private static final long SCAN_INTERVAL_MS = 30_000;
 
     // How many samples of live raw-sensor history to keep for the
-    // Settings graphs (pushRawHistorySample() is called once/sec from the
-    // UI tick while that section is open) -- a couple of minutes' worth.
-    public static final int RAW_HISTORY_SIZE = 120;
+    // Settings graphs (pushRawHistorySample() is called every
+    // MainActivity.MAPPING_TICK_MS, ~300ms, while that section is open)
+    // -- a bit over a minute's worth.
+    public static final int RAW_HISTORY_SIZE = 240;
 
     // Meters of altitude per hPa of pressure change, a standard
     // near-sea-level approximation good enough to guess a floor change
@@ -113,6 +116,11 @@ public class MappingCollector {
     // bootstrapped once from the first fused-heading reading.
     private double gyroYawDeg = Double.NaN;
     private long lastGyroTimestampNs = 0;
+    // Fraction of the gyro-vs-compass heading gap corrected per fused-
+    // heading update (~SENSOR_DELAY_UI, tens of ms) -- small enough that
+    // indoor magnetic noise barely moves gyroYawDeg on any single update,
+    // but large enough to bound drift over a multi-minute walk.
+    private static final double HEADING_COMPASS_PULL = 0.02;
 
     // Running min/max of accelerometer magnitude since the last step,
     // feeding Weinberg's per-step dynamic stride-length estimate (see
@@ -180,7 +188,21 @@ public class MappingCollector {
                     headingDeg = (deg + 360f) % 360f;
                     pitchDeg = (float) Math.toDegrees(orientation[1]);
                     rollDeg = (float) Math.toDegrees(orientation[2]);
-                    if (Double.isNaN(gyroYawDeg)) gyroYawDeg = headingDeg; // one-time bootstrap
+                    if (Double.isNaN(gyroYawDeg)) {
+                        gyroYawDeg = headingDeg; // one-time bootstrap
+                    } else {
+                        // Continuous small pull toward the compass heading
+                        // so gyro-integration bias doesn't drift forever
+                        // over a long session (see class doc) -- a fixed
+                        // one-time bootstrap alone lets small per-sample
+                        // gyro error compound into a growing rotation over
+                        // many minutes, which is what a walked loop not
+                        // closing on itself looks like. The weight is kept
+                        // small so a single bad indoor-magnetic reading
+                        // can't yank heading off course either.
+                        double diff = shortestAngleDiffDeg(headingDeg, gyroYawDeg);
+                        gyroYawDeg = ((gyroYawDeg + diff * HEADING_COMPASS_PULL) % 360 + 360) % 360;
+                    }
                     break;
                 case Sensor.TYPE_STEP_DETECTOR:
                     stepCount++;
@@ -229,6 +251,13 @@ public class MappingCollector {
 
     private static float vectorMag(float[] v) {
         return (float) Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    }
+
+    // Shortest signed angular gap from `current` to `target`, in [-180, 180)
+    // -- without this, blending two headings across the 0/360 wraparound
+    // (e.g. target=5, current=355) would pull the wrong way around.
+    private static double shortestAngleDiffDeg(double target, double current) {
+        return (target - current + 540) % 360 - 180;
     }
 
     // Weinberg's dynamic step-length formula: length = K * (a_max - a_min)^(1/4),
