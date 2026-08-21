@@ -49,7 +49,12 @@ public class MappingCollector {
     private long sessionId = -1;
     private boolean running = false;
     private int stepCount = 0;
-    private float headingDeg = 0f;
+    // Full 3D orientation from the fused rotation-vector sensor (itself
+    // derived from gyroscope + accelerometer + magnetometer/compass) --
+    // heading drives dead reckoning, pitch/roll are recorded alongside it
+    // so the phone's tilt during each scan/step is captured too, not just
+    // its heading.
+    private float headingDeg = 0f, pitchDeg = 0f, rollDeg = 0f;
     private double posX = 0, posY = 0;
     private final float[] rotationMatrix = new float[9];
     private final float[] orientation = new float[3];
@@ -69,6 +74,8 @@ public class MappingCollector {
                 SensorManager.getOrientation(rotationMatrix, orientation);
                 float deg = (float) Math.toDegrees(orientation[0]);
                 headingDeg = (deg + 360f) % 360f;
+                pitchDeg = (float) Math.toDegrees(orientation[1]);
+                rollDeg = (float) Math.toDegrees(orientation[2]);
             } else if (event.sensor.getType() == Sensor.TYPE_STEP_DETECTOR) {
                 stepCount++;
                 double rad = Math.toRadians(headingDeg);
@@ -188,10 +195,10 @@ public class MappingCollector {
     private void recordMotionSample() {
         long sid = sessionId;
         long ts = System.currentTimeMillis();
-        float h = headingDeg;
+        float h = headingDeg, p = pitchDeg, r = rollDeg;
         int steps = stepCount;
         double x = posX, y = posY;
-        dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, steps, x, y));
+        dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y));
         if (listener != null) listener.onHeadingSteps(h, steps);
     }
 }

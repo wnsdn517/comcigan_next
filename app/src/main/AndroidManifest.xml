@@ -12,12 +12,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- Experimental indoor-mapping data collection (Settings -> 실내 지도 만들기).
-         Off by default; only requested when the user starts a mapping session. -->
+    <!-- Experimental indoor-mapping data collection (실내 지도 만들기). Runs as an
+         always-on background service once the user has consented and granted
+         these -- not a manual toggle. Requested right after onboarding
+         consent, not on every app open. -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
 
     <application
         android:label="컴시간알리미+"
@@ -47,6 +50,11 @@
             android:name="dev.rocky.comcitime.LiveNotifyService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name="dev.rocky.comcitime.MappingService"
+            android:exported="false"
+            android:foregroundServiceType="location" />
 
     </application>
 </manifest>
