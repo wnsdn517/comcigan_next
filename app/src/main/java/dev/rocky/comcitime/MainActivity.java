@@ -199,8 +199,23 @@ public class MainActivity extends Activity {
         infoCard.addView(onboardingLine("급식 정보(선택)", "설정 탭에서 NEIS 공개 API 키를 직접 입력하시면 급식 정보도 볼 수 있어요."));
         root.addView(infoCard, cardLp());
 
+        TextView permTitle = new TextView(this);
+        permTitle.setText("필요한 권한");
+        permTitle.setTextColor(UiKit.TEXT_PRIMARY);
+        permTitle.setTypeface(Typeface.DEFAULT_BOLD);
+        permTitle.setTextSize(15);
+        permTitle.setPadding(dp(2), dp(4), 0, dp(8));
+        root.addView(permTitle);
+
+        LinearLayout permCard = card();
+        permCard.addView(onboardingLine("알림", "시간표 변동, 쉬는시간, 아침 시간표 알림을 보내려면 필요해요. 다음 화면에서 허용을 눌러주세요."));
+        permCard.addView(onboardingLine("정확한 알람", "설정하신 시각에 알림이 오차 없이 정확히 오도록 사용해요."));
+        permCard.addView(onboardingLine("기기 재시작 시 실행", "기기를 껐다 켜도 예약해둔 알림이 계속 동작하도록 사용해요."));
+        permCard.addView(onboardingLine("포그라운드 서비스 (Live Notify)", "설정에서 Live Notify를 켜면, 지금 몇 교시인지 상단바에 계속 표시하기 위해 사용해요. 끄면 사용하지 않아요."));
+        root.addView(permCard, cardLp());
+
         CheckBox agree = new CheckBox(this);
-        agree.setText("위 내용에 동의하고 시작할게요");
+        agree.setText("위 내용과 권한 사용에 동의하고 시작할게요");
         agree.setTextColor(UiKit.TEXT_PRIMARY);
         root.addView(agree);
 
@@ -335,36 +350,57 @@ public class MainActivity extends Activity {
         int dow = mondayBasedDow();
         if (dow == 0) { nowPanel.setVisibility(View.GONE); return; }
 
-        Timetable.PeriodEntry current = null;
         Timetable tt = weekSections.get(0).tt;
         List<Timetable.PeriodEntry> today = tt.getDaySchedule(prefs.grade(), prefs.classNum(), dow);
         Calendar now = Calendar.getInstance();
         int nowMinutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE);
+
+        Timetable.PeriodEntry current = null;
+        Timetable.PeriodEntry next = null;
+        int nextStart = Integer.MAX_VALUE;
+        Integer dayStart = null, dayEnd = null;
         for (Timetable.PeriodEntry e : today) {
             Integer[] range = parsePeriodRange(prefs.periodTime(e.period));
             if (range == null) continue;
-            if (nowMinutes >= range[0] && nowMinutes < range[1]) { current = e; break; }
+            dayStart = dayStart == null ? range[0] : Math.min(dayStart, range[0]);
+            dayEnd = dayEnd == null ? range[1] : Math.max(dayEnd, range[1]);
+            if (nowMinutes >= range[0] && nowMinutes < range[1]) {
+                current = e;
+            } else if (range[0] > nowMinutes && range[0] < nextStart) {
+                nextStart = range[0];
+                next = e;
+            }
         }
-        if (current == null) { nowPanel.setVisibility(View.GONE); return; }
 
+        if (current != null) {
+            renderNowPanelInClass(current);
+        } else if (dayStart != null && nowMinutes >= dayStart && nowMinutes < dayEnd) {
+            renderNowPanelBreak(next);
+        } else {
+            nowPanel.setVisibility(View.GONE);
+        }
+    }
+
+    private void renderNowPanelInClass(Timetable.PeriodEntry current) {
         nowPanel.removeAllViews();
         nowPanel.setVisibility(View.VISIBLE);
+        int subjColor = prefs.subjectColor(current.subject);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(blend(prefs.subjectColor(current.subject), UiKit.SURFACE, 0.35f));
+        bg.setColor(prefs.solidTimetableColor() ? UiKit.darken(subjColor, 0.55f) : blend(subjColor, UiKit.SURFACE, 0.35f));
         bg.setCornerRadius(dp(14));
         bg.setStroke(dp(2), UiKit.ACCENT);
         nowPanel.setBackground(bg);
         nowPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
 
         TextView live = new TextView(this);
-        live.setText("\ud83d\udd34 지금 " + current.period + "교시");
+        live.setText("🔴 지금 " + current.period + "교시");
         live.setTextColor(UiKit.ACCENT);
         live.setTypeface(Typeface.DEFAULT_BOLD);
         live.setTextSize(12);
         nowPanel.addView(live);
 
         TextView subj = new TextView(this);
-        subj.setText(current.subject + (current.teacher.isEmpty() ? "" : "  \u00b7  " + current.teacher));
+        subj.setText(current.subject + (current.teacher.isEmpty() ? "" : "  ·  " + current.teacher));
         subj.setTextColor(Color.WHITE);
         subj.setTextSize(18);
         subj.setTypeface(Typeface.DEFAULT_BOLD);
@@ -375,12 +411,42 @@ public class MainActivity extends Activity {
         Prefs.PersonalEvent ev = prefs.findPersonalEvent(today2, current.period);
         if (ev != null) {
             TextView evText = new TextView(this);
-            evText.setText("\ud83d\udcdd " + ev.text);
+            evText.setText("📝 " + ev.text);
             evText.setTextColor(0xDDFFFFFF);
             evText.setTextSize(12);
             evText.setPadding(0, dp(4), 0, 0);
             nowPanel.addView(evText);
         }
+    }
+
+    private void renderNowPanelBreak(Timetable.PeriodEntry next) {
+        nowPanel.removeAllViews();
+        nowPanel.setVisibility(View.VISIBLE);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(UiKit.SURFACE_ALT);
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(1), UiKit.BORDER);
+        nowPanel.setBackground(bg);
+        nowPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
+
+        TextView live = new TextView(this);
+        live.setText("☕ 쉬는시간");
+        live.setTextColor(UiKit.TEXT_SECONDARY);
+        live.setTypeface(Typeface.DEFAULT_BOLD);
+        live.setTextSize(12);
+        nowPanel.addView(live);
+
+        TextView subj = new TextView(this);
+        if (next != null) {
+            subj.setText("다음: " + next.period + "교시 " + next.subject + (next.teacher.isEmpty() ? "" : "  ·  " + next.teacher));
+        } else {
+            subj.setText("오늘 남은 수업이 없어요.");
+        }
+        subj.setTextColor(UiKit.TEXT_PRIMARY);
+        subj.setTextSize(16);
+        subj.setTypeface(Typeface.DEFAULT_BOLD);
+        subj.setPadding(0, dp(4), 0, 0);
+        nowPanel.addView(subj);
     }
 
     private Integer[] parsePeriodRange(String range) {
