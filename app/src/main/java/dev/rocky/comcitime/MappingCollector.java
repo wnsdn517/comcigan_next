@@ -33,6 +33,11 @@ public class MappingCollector {
     // so requestScan() doesn't silently get dropped by the platform.
     private static final long SCAN_INTERVAL_MS = 30_000;
 
+    // Average adult stride length in meters, used to turn a step count into
+    // a distance for dead reckoning. Rough on purpose -- good enough to
+    // build a walkable trajectory without any manual position input.
+    private static final double STEP_LENGTH_M = 0.75;
+
     private final Context ctx;
     private final MappingDb db;
     private final WifiManager wifiManager;
@@ -45,6 +50,7 @@ public class MappingCollector {
     private boolean running = false;
     private int stepCount = 0;
     private float headingDeg = 0f;
+    private double posX = 0, posY = 0;
     private final float[] rotationMatrix = new float[9];
     private final float[] orientation = new float[3];
 
@@ -65,6 +71,9 @@ public class MappingCollector {
                 headingDeg = (deg + 360f) % 360f;
             } else if (event.sensor.getType() == Sensor.TYPE_STEP_DETECTOR) {
                 stepCount++;
+                double rad = Math.toRadians(headingDeg);
+                posX += STEP_LENGTH_M * Math.sin(rad);
+                posY += STEP_LENGTH_M * Math.cos(rad);
                 recordMotionSample();
             }
         }
@@ -101,6 +110,8 @@ public class MappingCollector {
         if (running) return;
         running = true;
         stepCount = 0;
+        posX = 0;
+        posY = 0;
         sessionId = db.startSession();
 
         ctx.registerReceiver(scanReceiver, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
@@ -131,10 +142,14 @@ public class MappingCollector {
         dbExecutor.execute(() -> db.endSession(sid));
     }
 
+    // The waypoint is tagged at the position dead reckoning has already
+    // computed automatically -- this is an optional ground-truth label on
+    // top of that, not how the position itself is obtained.
     public void addWaypoint(String floor, String label) {
         if (sessionId < 0) return;
         long sid = sessionId;
-        dbExecutor.execute(() -> db.insertWaypoint(sid, floor, label));
+        double x = posX, y = posY;
+        dbExecutor.execute(() -> db.insertWaypoint(sid, floor, label, x, y));
     }
 
     // Synchronous on purpose -- only called from an explicit user tap
@@ -161,9 +176,10 @@ public class MappingCollector {
         }
         long sid = sessionId;
         long ts = System.currentTimeMillis();
+        double x = posX, y = posY;
         dbExecutor.execute(() -> {
             for (ScanResult r : results) {
-                db.insertRadioScan(sid, ts, r.BSSID, r.level, r.frequency);
+                db.insertRadioScan(sid, ts, r.BSSID, r.level, r.frequency, x, y);
             }
         });
         if (listener != null) listener.onScanCount(results.size());
@@ -174,7 +190,8 @@ public class MappingCollector {
         long ts = System.currentTimeMillis();
         float h = headingDeg;
         int steps = stepCount;
-        dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, steps));
+        double x = posX, y = posY;
+        dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, steps, x, y));
         if (listener != null) listener.onHeadingSteps(h, steps);
     }
 }

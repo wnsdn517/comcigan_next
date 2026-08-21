@@ -56,6 +56,7 @@ public class MainActivity extends Activity {
     private final List<WeekSection> weekSections = new ArrayList<>();
     private final Handler nowPanelHandler = new Handler();
     private Button prevWeekBtn;
+    private int loadGeneration = 0;
 
     private static class WeekSection {
         Timetable tt;
@@ -135,7 +136,7 @@ public class MainActivity extends Activity {
         loadPrefsIntoUi();
         showPage(prefs.schoolCode().isEmpty() ? 2 : 0);
 
-        if (prefs.onboardingDone()) {
+        if (prefs.onboardingDone() && prefs.mappingConsentDone()) {
             onboardingOverlay.setVisibility(View.GONE);
             requestNotifPermissionIfNeeded();
         }
@@ -294,6 +295,7 @@ public class MainActivity extends Activity {
         });
         startBtn.setOnClickListener(v -> {
             prefs.setOnboardingDone(true);
+            prefs.setMappingConsentDone(true);
             onboardingOverlay.setVisibility(View.GONE);
             requestNotifPermissionIfNeeded();
         });
@@ -360,7 +362,7 @@ public class MainActivity extends Activity {
         root.addView(headerRow);
 
         TextView hint = new TextView(this);
-        hint.setText("길게 눌러 위로 밀면 선생님 시간표 고정 · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
+        hint.setText("길게 누르면 선생님 시간표 보기 · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
         hint.setTextColor(UiKit.TEXT_SECONDARY);
         hint.setTextSize(11);
         hint.setPadding(dp(20), 0, dp(20), dp(10));
@@ -418,6 +420,7 @@ public class MainActivity extends Activity {
         Timetable.PeriodEntry current = null;
         Timetable.PeriodEntry next = null;
         int nextStart = Integer.MAX_VALUE;
+        int currentEnd = -1;
         Integer dayStart = null, dayEnd = null;
         for (Timetable.PeriodEntry e : today) {
             Integer[] range = parsePeriodRange(prefs.periodTime(e.period));
@@ -426,6 +429,7 @@ public class MainActivity extends Activity {
             dayEnd = dayEnd == null ? range[1] : Math.max(dayEnd, range[1]);
             if (nowMinutes >= range[0] && nowMinutes < range[1]) {
                 current = e;
+                currentEnd = range[1];
             } else if (range[0] > nowMinutes && range[0] < nextStart) {
                 nextStart = range[0];
                 next = e;
@@ -433,27 +437,33 @@ public class MainActivity extends Activity {
         }
 
         if (current != null) {
-            renderNowPanelInClass(current);
+            renderNowPanelInClass(current, currentEnd - nowMinutes);
         } else if (dayStart != null && nowMinutes >= dayStart && nowMinutes < dayEnd) {
-            renderNowPanelBreak(next);
+            renderNowPanelBreak(next, next != null ? nextStart - nowMinutes : -1);
         } else {
             nowPanel.setVisibility(View.GONE);
         }
     }
 
-    private void renderNowPanelInClass(Timetable.PeriodEntry current) {
+    private String formatRemaining(int minutes) {
+        if (minutes < 0) minutes = 0;
+        if (minutes < 60) return minutes + "분";
+        return (minutes / 60) + "시간 " + (minutes % 60) + "분";
+    }
+
+    private void renderNowPanelInClass(Timetable.PeriodEntry current, int remainingMinutes) {
         nowPanel.removeAllViews();
         nowPanel.setVisibility(View.VISIBLE);
         int subjColor = prefs.subjectColor(current.subject);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(prefs.solidTimetableColor() ? UiKit.darken(subjColor, 0.55f) : blend(subjColor, UiKit.SURFACE, 0.35f));
+        bg.setColor(prefs.solidTimetableColor() ? UiKit.darken(prefs.solidBaseColor(), 0.55f) : blend(subjColor, UiKit.SURFACE, 0.35f));
         bg.setCornerRadius(dp(14));
         bg.setStroke(dp(2), UiKit.ACCENT);
         nowPanel.setBackground(bg);
         nowPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
 
         TextView live = new TextView(this);
-        live.setText("🔴 지금 " + current.period + "교시");
+        live.setText("🔴 지금 " + current.period + "교시 · " + formatRemaining(remainingMinutes) + " 남음");
         live.setTextColor(UiKit.ACCENT);
         live.setTypeface(Typeface.DEFAULT_BOLD);
         live.setTextSize(12);
@@ -479,7 +489,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void renderNowPanelBreak(Timetable.PeriodEntry next) {
+    private void renderNowPanelBreak(Timetable.PeriodEntry next, int remainingMinutes) {
         nowPanel.removeAllViews();
         nowPanel.setVisibility(View.VISIBLE);
         GradientDrawable bg = new GradientDrawable();
@@ -490,7 +500,7 @@ public class MainActivity extends Activity {
         nowPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
 
         TextView live = new TextView(this);
-        live.setText("☕ 쉬는시간");
+        live.setText(next != null ? "☕ 쉬는시간 · " + formatRemaining(remainingMinutes) + " 후 다음 수업" : "☕ 쉬는시간");
         live.setTextColor(UiKit.TEXT_SECONDARY);
         live.setTypeface(Typeface.DEFAULT_BOLD);
         live.setTextSize(12);
@@ -498,7 +508,7 @@ public class MainActivity extends Activity {
 
         TextView subj = new TextView(this);
         if (next != null) {
-            subj.setText("다음: " + next.period + "교시 " + next.subject + (next.teacher.isEmpty() ? "" : "  ·  " + next.teacher));
+            subj.setText(next.period + "교시 " + next.subject + (next.teacher.isEmpty() ? "" : "  ·  " + next.teacher));
         } else {
             subj.setText("오늘 남은 수업이 없어요.");
         }
@@ -531,7 +541,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    // Guards against a race that used to crash with IndexOutOfBoundsException:
+    // if loadAllWeeks() is called again (e.g. quickly re-tapping the 시간표
+    // tab) while a previous fetch chain is still in flight, the OLD chain's
+    // callbacks would keep firing and add sections built against a
+    // weekSections.size() that no longer matched weekSectionsContainer's
+    // actual child count (the new call had already reset the container).
+    // Every callback below checks its captured generation against the
+    // current one and bails out silently if a newer load has superseded it.
     private void loadAllWeeks() {
+        int myGeneration = ++loadGeneration;
         if (prefs.schoolCode().isEmpty()) {
             classHeaderLabel.setText("학급을 설정해주세요 \u203a");
             weekSectionsContainer.removeAllViews();
@@ -550,6 +569,7 @@ public class MainActivity extends Activity {
         weekSectionsContainer.addView(loadingRow("시간표를 불러오는 중..."));
 
         TimetableRepository.fetch(this, "1", (tt, offline, err) -> {
+            if (myGeneration != loadGeneration) return;
             weekSectionsContainer.removeAllViews();
             if (tt == null) {
                 weekSectionsContainer.addView(errorRow("불러오지 못했어요: " + (err != null ? err.getMessage() : "")));
@@ -560,16 +580,18 @@ public class MainActivity extends Activity {
                 weeks = new ArrayList<>();
                 weeks.add(new Timetable.WeekOption("1", "이번 주"));
             }
-            loadWeeksSequentially(weeks, 0, offline);
+            loadWeeksSequentially(myGeneration, weeks, 0, offline);
         });
     }
 
-    private void loadWeeksSequentially(List<Timetable.WeekOption> weeks, int index, boolean firstOffline) {
+    private void loadWeeksSequentially(int generation, List<Timetable.WeekOption> weeks, int index, boolean firstOffline) {
+        if (generation != loadGeneration) return;
         if (index >= weeks.size()) { renderNowPanel(); return; }
         Timetable.WeekOption w = weeks.get(index);
         TimetableRepository.fetch(this, w.code, (tt, offline, err) -> {
+            if (generation != loadGeneration) return;
             if (tt != null) addWeekSection(tt, index, offline);
-            loadWeeksSequentially(weeks, index + 1, firstOffline);
+            loadWeeksSequentially(generation, weeks, index + 1, firstOffline);
         });
     }
 
@@ -759,8 +781,13 @@ public class MainActivity extends Activity {
         return cell;
     }
 
+    // A plain long-press (no extra drag) previews the teacher's schedule
+    // in a floating sheet and auto-locks immediately; releasing the finger
+    // commits that into the main table (see commitTeacherViewInline).
+    // ACTION_MOVE only cancels a not-yet-fired long-press when the finger
+    // has clearly moved (e.g. the user is scrolling instead), so it
+    // doesn't fire on top of a scroll gesture.
     private void attachCellTouch(View cell, Timetable.PeriodEntry e, String date, int period) {
-        final long[] startTime = {0};
         final float[] startY = {0};
         final boolean[] longPressFired = {false};
         final boolean[] moved = {false};
@@ -770,7 +797,6 @@ public class MainActivity extends Activity {
         cell.setOnTouchListener((v, event) -> {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    startTime[0] = System.currentTimeMillis();
                     startY[0] = event.getRawY();
                     longPressFired[0] = false;
                     moved[0] = false;
@@ -780,15 +806,14 @@ public class MainActivity extends Activity {
                         pending[0] = () -> {
                             longPressFired[0] = true;
                             enterTeacherViewTemp(teacherName);
+                            lockTeacherView();
                         };
                         handler.postDelayed(pending[0], 420);
                     }
                     return true;
                 case MotionEvent.ACTION_MOVE:
                     float dy = startY[0] - event.getRawY();
-                    if (longPressFired[0] && !teacherViewLocked && dy > dp(70)) {
-                        lockTeacherView();
-                    } else if (!longPressFired[0] && Math.abs(dy) > dp(18)) {
+                    if (!longPressFired[0] && Math.abs(dy) > dp(18)) {
                         moved[0] = true;
                         if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     }
@@ -798,8 +823,7 @@ public class MainActivity extends Activity {
                             .setInterpolator(new OvershootInterpolator(4f)).start();
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     if (longPressFired[0]) {
-                        if (teacherViewLocked) commitTeacherViewInline();
-                        else exitTeacherView();
+                        commitTeacherViewInline();
                     } else if (!moved[0]) {
                         if (viewingTeacherName != null) {
                             exitTeacherView();
@@ -811,7 +835,7 @@ public class MainActivity extends Activity {
                 case MotionEvent.ACTION_CANCEL:
                     v.animate().scaleX(1f).scaleY(1f).setDuration(120).start();
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
-                    if (longPressFired[0] && !teacherViewLocked) exitTeacherView();
+                    if (longPressFired[0]) commitTeacherViewInline();
                     return true;
             }
             return false;
@@ -841,12 +865,12 @@ public class MainActivity extends Activity {
     }
 
     private void fillCell(LinearLayout cell, String subject, String subLabel, boolean changed) {
-        int color = prefs.subjectColor(subject);
         GradientDrawable bg = new GradientDrawable();
         if (prefs.solidTimetableColor()) {
-            bg.setColor(changed ? UiKit.darken(color, 0.6f) : color);
+            int base = prefs.solidBaseColor();
+            bg.setColor(changed ? UiKit.darken(base, 0.6f) : base);
         } else {
-            bg.setColor(blend(color, UiKit.SURFACE, 0.72f));
+            bg.setColor(blend(prefs.subjectColor(subject), UiKit.SURFACE, 0.72f));
         }
         bg.setCornerRadius(dp(6));
         cell.setBackground(bg);
@@ -941,7 +965,9 @@ public class MainActivity extends Activity {
     // touches the main grid's view hierarchy -- rebuilding the grid the
     // finger is still resting on mid-gesture was exactly what caused the
     // "flashes then immediately reverts" bug (Android auto-cancels the
-    // touch when its view gets detached).
+    // touch when its view gets detached). A plain long-press is enough to
+    // trigger this and it auto-locks immediately (see attachCellTouch) --
+    // there is no separate drag-to-lock step anymore.
     private void enterTeacherViewTemp(String teacherName) {
         viewingTeacherName = teacherName;
         teacherViewLocked = false;
@@ -950,13 +976,12 @@ public class MainActivity extends Activity {
         teacherPreviewOverlay.setVisibility(View.VISIBLE);
         teacherPreviewOverlay.setAlpha(0f);
         teacherPreviewOverlay.animate().alpha(1f).setDuration(150).start();
-        teacherModeIndicator.setText(teacherName + " 선생님 시간표 보는 중 -- 위로 밀면 고정");
         teacherModeIndicator.setVisibility(View.VISIBLE);
     }
 
     private void lockTeacherView() {
         teacherViewLocked = true;
-        teacherModeIndicator.setText("\ud83d\udd12 " + viewingTeacherName + " 선생님 시간표 고정됨 -- 탭하면 해제");
+        teacherModeIndicator.setText("\ud83d\udd12 " + viewingTeacherName + " 선생님 시간표 -- 손을 떼면 표에 적용돼요");
     }
 
     // Called once the finger lifts after a locked long-press. The drag
@@ -1434,10 +1459,38 @@ public class MainActivity extends Activity {
 
         LinearLayout displayCard = card();
         displayCard.addView(eyebrow("표시 방식"));
-        solidColorCheck = styledCheckbox("단색으로 표시 (변동은 진한 색)");
+        solidColorCheck = styledCheckbox("단색으로 표시 (모든 과목 같은 색, 변동은 진한 색)");
         LinearLayout.LayoutParams solidLp = matchWrap();
         solidLp.topMargin = dp(4);
         displayCard.addView(solidColorCheck, solidLp);
+
+        LinearLayout baseColorRow = new LinearLayout(this);
+        baseColorRow.setOrientation(LinearLayout.HORIZONTAL);
+        baseColorRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams baseColorRowLp = matchWrap();
+        baseColorRowLp.topMargin = dp(8);
+        TextView baseColorLabel = new TextView(this);
+        baseColorLabel.setText("단색 모드 기준 색");
+        UiKit.styleCaption(baseColorLabel);
+        baseColorRow.addView(baseColorLabel, weightedWrap());
+        View baseColorSwatch = new View(this);
+        GradientDrawable baseColorSwatchBg = new GradientDrawable();
+        baseColorSwatchBg.setColor(prefs.solidBaseColor());
+        baseColorSwatchBg.setCornerRadius(dp(8));
+        baseColorSwatch.setBackground(baseColorSwatchBg);
+        LinearLayout.LayoutParams baseColorSwatchLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+        baseColorSwatch.setLayoutParams(baseColorSwatchLp);
+        baseColorSwatch.setClickable(true);
+        baseColorSwatch.setFocusable(true);
+        UiKit.attachBouncyPress(baseColorSwatch);
+        baseColorSwatch.setOnClickListener(v -> UiKit.showColorPicker(this, color -> {
+            prefs.setSolidBaseColor(color);
+            baseColorSwatchBg.setColor(color);
+            rerenderAllSections();
+        }));
+        baseColorRow.addView(baseColorSwatch);
+        displayCard.addView(baseColorRow, baseColorRowLp);
+
         solidColorCheck.setOnCheckedChangeListener((b, checked) -> {
             prefs.setSolidTimetableColor(checked);
             rerenderAllSections();
@@ -1445,7 +1498,12 @@ public class MainActivity extends Activity {
         section.addView(displayCard, cardLp());
 
         LinearLayout colorsCard = card();
-        colorsCard.addView(eyebrow("과목 색상"));
+        colorsCard.addView(eyebrow("과목별 색상"));
+        TextView colorsHint = new TextView(this);
+        colorsHint.setText("단색 모드가 꺼져 있을 때 사용돼요.");
+        UiKit.styleCaption(colorsHint);
+        colorsHint.setPadding(0, dp(2), 0, 0);
+        colorsCard.addView(colorsHint);
         colorsList = new LinearLayout(this);
         colorsList.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams clp = matchWrap();
@@ -1571,7 +1629,7 @@ public class MainActivity extends Activity {
         LinearLayout infoCard = card();
         infoCard.addView(eyebrow("실내 지도 데이터 수집 (실험 기능)"));
         TextView desc = new TextView(this);
-        desc.setText("학교 실내 위치 지도를 만들기 위한 테스트 기능이에요. 시작을 누르고 걸어 다니면 Wi-Fi 신호 세기와 걸음/방향 정보를 이 기기에만 저장해요. 서버로 보내지 않고, 특정 인물과 연결되지 않는 익명 데이터예요.");
+        desc.setText("학교 실내 위치 지도를 만들기 위한 테스트 기능이에요. 시작을 누르고 걸어 다니기만 하면 걸음 수와 방향으로 이동 경로를 자동으로 계산해서 Wi-Fi 신호 세기와 함께 기록해요 (수동으로 위치를 입력할 필요 없어요). 서버로 보내지 않고, 특정 인물과 연결되지 않는 익명 데이터로 이 기기에만 저장해요.");
         UiKit.styleCaption(desc);
         desc.setPadding(0, dp(6), 0, 0);
         infoCard.addView(desc);
@@ -1605,7 +1663,12 @@ public class MainActivity extends Activity {
         section.addView(statusCard, cardLp());
 
         LinearLayout waypointCard = card();
-        waypointCard.addView(eyebrow("현재 위치 표시"));
+        waypointCard.addView(eyebrow("위치 이름표 (선택)"));
+        TextView waypointHint = new TextView(this);
+        waypointHint.setText("이동 경로는 자동으로 기록돼요. 나중에 지도에 이름을 붙이고 싶은 지점이 있으면 여기서 표시해두세요.");
+        UiKit.styleCaption(waypointHint);
+        waypointHint.setPadding(0, dp(2), 0, 0);
+        waypointCard.addView(waypointHint);
         LinearLayout wRow = new LinearLayout(this);
         wRow.setOrientation(LinearLayout.HORIZONTAL);
         wRow.setPadding(0, dp(6), 0, 0);
@@ -1658,7 +1721,7 @@ public class MainActivity extends Activity {
         if (mappingStatusText == null || mappingCollector == null) return;
         if (!mappingCollector.isRunning()) mappingStatusText.setText("꺼짐");
         MappingDb.Counts c = mappingCollector.counts();
-        mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · Wi-Fi 스캔 " + c.scans + "개 · 표시 " + c.waypoints + "개");
+        mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans + "개 · 이름표 " + c.waypoints + "개");
     }
 
     private AutoCompleteTextView makePickerInput(String[] options) {

@@ -22,7 +22,9 @@
 (`workflow_dispatch`)마다 자동으로 빌드해서 Actions 실행 결과의 Artifacts에 올려줍니다.
 - `main` 푸시: 릴리즈 APK를 빌드해서 `comcitime-release-apk`로 올립니다. `RELEASE_KEYSTORE_FILE`,
   `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD` 환경변수(예: CI
-  시크릿)가 모두 주어지면 그 키스토어로 서명하고, 없으면 서명 없이(unsigned) 빌드합니다.
+  시크릿)가 모두 주어지면 그 키스토어로 서명하고, 없으면 (unsigned APK는 설치가 안 되므로)
+  자동 생성되는 디버그 키로 서명해서 항상 설치 가능한 APK를 만듭니다. 정식 배포 전에는
+  꼭 실제 릴리즈 키스토어를 시크릿으로 등록하세요.
 - `dev` 푸시, PR, 그 외 실행: 디버그 APK를 빌드해서 `comcitime-debug-apk`로 올립니다.
 
 ## 핵심 파일 요약

@@ -2,10 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
-// Release signing is optional: if a keystore is provided via environment
-// variables (e.g. from CI secrets), the release build is signed with it.
-// Otherwise release builds are produced unsigned, which still lets CI
-// build and upload a release APK without needing a keystore checked in.
+// Release signing: if a keystore is provided via environment variables
+// (e.g. from CI secrets), the release build is signed with it. Otherwise
+// it falls back to AGP's auto-generated debug keystore so the release
+// build is ALWAYS signed and installable -- an unsigned APK can't be
+// installed on a real device at all (Android rejects it outright), which
+// is exactly what was happening before this fallback existed.
 def releaseKeystorePath = System.getenv('RELEASE_KEYSTORE_FILE')
 def hasReleaseSigning = releaseKeystorePath != null && file(releaseKeystorePath).exists()
 
@@ -35,9 +37,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
-            if (hasReleaseSigning) {
-                signingConfig signingConfigs.release
-            }
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
         }
     }
 

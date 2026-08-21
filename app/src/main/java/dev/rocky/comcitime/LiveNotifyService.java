@@ -75,6 +75,10 @@ public class LiveNotifyService extends Service {
         }
     }
 
+    // Mirrors MainActivity's now-panel logic: distinguishes "in a class",
+    // "on a break between classes" (with the next class + time remaining),
+    // and "before/after school" instead of lumping breaks and off-hours
+    // into one generic "쉬는시간이거나 수업 시간이 아닙니다" message.
     private void updateNotification(Prefs prefs, boolean offline) {
         if (cached == null) return;
         int dow = mondayBased(Calendar.getInstance().get(Calendar.DAY_OF_WEEK));
@@ -84,33 +88,56 @@ public class LiveNotifyService extends Service {
             return;
         }
         List<Timetable.PeriodEntry> today = cached.getDaySchedule(prefs.grade(), prefs.classNum(), dow);
-        Timetable.PeriodEntry current = findCurrentPeriod(prefs, today);
-
-        String title, text;
-        if (current == null) {
-            title = "컴시간알리미";
-            text = "지금은 쉬는시간이거나 수업 시간이 아닙니다.";
-        } else {
-            title = current.period + "교시 진행중";
-            text = current.subject + (current.teacher.isEmpty() ? "" : " (" + current.teacher + ")");
-        }
-        if (offline) title = title + " (오프라인)";
-        android.app.NotificationManager nm = getSystemService(android.app.NotificationManager.class);
-        nm.notify(NotificationHelper.ID_LIVE, NotificationHelper.buildLive(this, title, text));
-    }
-
-    private Timetable.PeriodEntry findCurrentPeriod(Prefs prefs, List<Timetable.PeriodEntry> today) {
         Calendar now = Calendar.getInstance();
         int nowMinutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE);
+
+        Timetable.PeriodEntry current = null;
+        Timetable.PeriodEntry next = null;
+        int currentEnd = -1;
+        int nextStart = Integer.MAX_VALUE;
+        Integer dayStart = null, dayEnd = null;
         for (Timetable.PeriodEntry e : today) {
             String[] parts = prefs.periodTime(e.period).split("-");
             if (parts.length != 2) continue;
             Integer start = toMinutes(parts[0]);
             Integer end = toMinutes(parts[1]);
             if (start == null || end == null) continue;
-            if (nowMinutes >= start && nowMinutes < end) return e;
+            dayStart = dayStart == null ? start : Math.min(dayStart, start);
+            dayEnd = dayEnd == null ? end : Math.max(dayEnd, end);
+            if (nowMinutes >= start && nowMinutes < end) {
+                current = e;
+                currentEnd = end;
+            } else if (start > nowMinutes && start < nextStart) {
+                nextStart = start;
+                next = e;
+            }
         }
-        return null;
+
+        String title, text;
+        if (current != null) {
+            title = current.period + "교시 진행중 · " + formatRemaining(currentEnd - nowMinutes) + " 남음";
+            text = current.subject + (current.teacher.isEmpty() ? "" : " (" + current.teacher + ")");
+        } else if (dayStart != null && nowMinutes >= dayStart && nowMinutes < dayEnd) {
+            if (next != null) {
+                title = "쉬는시간 · " + formatRemaining(nextStart - nowMinutes) + " 후 다음 수업";
+                text = next.period + "교시 " + next.subject + (next.teacher.isEmpty() ? "" : " (" + next.teacher + ")");
+            } else {
+                title = "쉬는시간";
+                text = "오늘 남은 수업이 없습니다.";
+            }
+        } else {
+            title = "컴시간알리미";
+            text = "지금은 등교 전이거나 하교 후입니다.";
+        }
+        if (offline) title = title + " (오프라인)";
+        android.app.NotificationManager nm = getSystemService(android.app.NotificationManager.class);
+        nm.notify(NotificationHelper.ID_LIVE, NotificationHelper.buildLive(this, title, text));
+    }
+
+    private String formatRemaining(int minutes) {
+        if (minutes < 0) minutes = 0;
+        if (minutes < 60) return minutes + "분";
+        return (minutes / 60) + "시간 " + (minutes % 60) + "분";
     }
 
     private Integer toMinutes(String hhmm) {
