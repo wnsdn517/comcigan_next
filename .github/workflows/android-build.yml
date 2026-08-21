@@ -2,7 +2,7 @@ name: Android Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
   workflow_dispatch:
 
@@ -25,10 +25,26 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
+      # main builds a release APK; every other trigger (dev, PRs, manual
+      # runs off other branches) builds a debug APK.
+      - name: Build release APK
+        if: github.ref == 'refs/heads/main'
+        run: ./gradlew assembleRelease --stacktrace
+
       - name: Build debug APK
+        if: github.ref != 'refs/heads/main'
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Upload APK
+      - name: Upload release APK
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: comcitime-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Upload debug APK
+        if: github.ref != 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: comcitime-debug-apk

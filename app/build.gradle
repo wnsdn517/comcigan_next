@@ -2,6 +2,13 @@ plugins {
     id 'com.android.application'
 }
 
+// Release signing is optional: if a keystore is provided via environment
+// variables (e.g. from CI secrets), the release build is signed with it.
+// Otherwise release builds are produced unsigned, which still lets CI
+// build and upload a release APK without needing a keystore checked in.
+def releaseKeystorePath = System.getenv('RELEASE_KEYSTORE_FILE')
+def hasReleaseSigning = releaseKeystorePath != null && file(releaseKeystorePath).exists()
+
 android {
     namespace 'dev.rocky.comcitime'
     compileSdk 34
@@ -14,9 +21,23 @@ android {
         versionName '1.0'
     }
 
+    if (hasReleaseSigning) {
+        signingConfigs {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword System.getenv('RELEASE_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('RELEASE_KEY_ALIAS')
+                keyPassword System.getenv('RELEASE_KEY_PASSWORD')
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 

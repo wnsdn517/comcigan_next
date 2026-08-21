@@ -18,9 +18,12 @@
 결과 APK는 `app/build/outputs/apk/debug/app-debug.apk` 에 생성됩니다.
 
 ## 자동 빌드 (GitHub Actions)
-`.github/workflows/android-build.yml` 워크플로우가 `main` 브랜치 푸시, PR, 수동 실행
-(`workflow_dispatch`)마다 디버그 APK를 빌드해서 Actions 실행 결과의 Artifacts에
-`comcitime-debug-apk`로 올려줍니다.
+`.github/workflows/android-build.yml` 워크플로우가 `main`/`dev` 브랜치 푸시, PR, 수동 실행
+(`workflow_dispatch`)마다 자동으로 빌드해서 Actions 실행 결과의 Artifacts에 올려줍니다.
+- `main` 푸시: 릴리즈 APK를 빌드해서 `comcitime-release-apk`로 올립니다. `RELEASE_KEYSTORE_FILE`,
+  `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD` 환경변수(예: CI
+  시크릿)가 모두 주어지면 그 키스토어로 서명하고, 없으면 서명 없이(unsigned) 빌드합니다.
+- `dev` 푸시, PR, 그 외 실행: 디버그 APK를 빌드해서 `comcitime-debug-apk`로 올립니다.
 
 ## 핵심 파일 요약
 - `ComciganApi.java` — comci.kr 비공식 API 클라이언트 (쿼리 인코딩, 학교검색, 시간표조회)
