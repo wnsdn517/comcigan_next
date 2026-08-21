@@ -34,3 +34,5 @@
 - `NotificationScheduler.java` / `AlarmReceiver.java` — 알림 스케줄링
 - `LiveNotifyService.java` — 상단바 실시간 표시
 - `UiKit.java` — 디자인 토큰 및 애니메이션 헬퍼
+- `MappingCollector.java` / `MappingDb.java` — 실내 지도 만들기(실험 기능)용 Wi-Fi/센서
+  데이터 수집 및 로컬 SQLite 저장. 서버 업로드는 아직 없고, 기기에만 저장됩니다.
