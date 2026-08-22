@@ -165,6 +165,23 @@ public class MappingCollector {
     private long lastStepTimeMs = 0;
     private boolean peakSearching = true;
 
+    // Cadence-consistency confirmation: a single accelerometer peak
+    // crossing PEAK_THRESHOLD isn't credited as a step by itself -- a hand
+    // tremor, a desk tap, or picking the phone up all cross that threshold
+    // once too, and raising PEAK_THRESHOLD to filter those out just makes
+    // real light footsteps get missed instead (the tradeoff the amplitude
+    // threshold can't escape). What a genuine footstep has that an
+    // isolated jolt never does is rhythm: it's followed by another peak
+    // roughly a stride later. So a peak is only ever committed to
+    // stepCount/position once a second peak confirms it within
+    // MAX_STEP_INTERVAL_MS -- gating on *timing between peaks*, not their
+    // amplitude, so it doesn't trade off against light-footstep detection.
+    private static final long MAX_STEP_INTERVAL_MS = 1100; // ~55 steps/min lower bound
+    private boolean inGaitStreak = false;
+    private boolean pendingStepPresent = false;
+    private double pendingStepLenM = 0;
+    private double pendingStepDirDeg = 0;
+
     // Stationary detection (short-window accelerometer variance), used to
     // trust the compass more while the phone is known to be still -- see
     // class doc and HEADING_COMPASS_PULL_STATIONARY above.
@@ -270,8 +287,11 @@ public class MappingCollector {
                     accelMag = vectorMag(event.values);
                     accelMinInStep = Math.min(accelMinInStep, accelMag);
                     accelMaxInStep = Math.max(accelMaxInStep, accelMag);
-                    processCustomStepDetection(accelMag);
+                    // Stationary detection runs first so processCustomStepDetection()
+                    // below sees isStationary for *this* sample, not the
+                    // previous one.
                     processStationaryDetection(accelMag);
+                    processCustomStepDetection(accelMag);
                     break;
                 case Sensor.TYPE_GYROSCOPE:
                     gyroX = event.values[0]; gyroY = event.values[1]; gyroZ = event.values[2];
@@ -337,35 +357,76 @@ public class MappingCollector {
         float relativeMag = Math.abs(mag - gravity);
 
         if (peakSearching && relativeMag > PEAK_THRESHOLD && (now - lastStepTimeMs) > STEP_COOLDOWN_MS) {
-            onStepDetected();
-            lastStepTimeMs = now;
+            onPeakDetected(now);
             peakSearching = false;
         } else if (!peakSearching && relativeMag < PEAK_THRESHOLD / 2) {
             peakSearching = true;
         }
     }
 
-    private void onStepDetected() {
-        isStationary = false;
-        stepCount++;
+    // One accelerometer peak just crossed PEAK_THRESHOLD -- decide whether
+    // to credit it as a step immediately, use it to confirm a step stashed
+    // a stride ago, or stash it as pending itself. See the
+    // MAX_STEP_INTERVAL_MS comment above for why.
+    private void onPeakDetected(long now) {
+        long gapMs = now - lastStepTimeMs;
         double stepLen = estimateStepLength();
         double dirDeg = Double.isNaN(gyroYawDeg) ? headingDeg : gyroYawDeg;
-        double rad = Math.toRadians(dirDeg);
-        posX += stepLen * Math.sin(rad);
-        posY += stepLen * Math.cos(rad);
-        posVarX += STEP_PROCESS_NOISE;
-        posVarY += STEP_PROCESS_NOISE;
-        lastStepLengthM = stepLen;
         accelMinInStep = Float.MAX_VALUE;
         accelMaxInStep = -Float.MAX_VALUE;
+
+        if (inGaitStreak && gapMs <= MAX_STEP_INTERVAL_MS) {
+            // Continuing an already-confirmed walking streak.
+            applyStep(stepLen, dirDeg);
+        } else if (pendingStepPresent && gapMs <= MAX_STEP_INTERVAL_MS) {
+            // This peak arrived on-rhythm after the stashed one -- both are
+            // real steps, and the streak is now established.
+            commitPendingStep();
+            applyStep(stepLen, dirDeg);
+            inGaitStreak = true;
+        } else {
+            // Isolated peak, or the previous streak's rhythm broke. Don't
+            // credit it yet -- only a rhythmic follow-up peak can confirm
+            // it later, which a lone jolt never produces.
+            inGaitStreak = false;
+            stashPendingStep(stepLen, dirDeg);
+        }
+        lastStepTimeMs = now;
+    }
+
+    // Shared by an immediately-committed peak and a pending peak confirmed
+    // one stride later, so both update position/variance identically using
+    // the length/heading captured at the moment that peak actually happened.
+    private void applyStep(double stepLenM, double dirDeg) {
+        isStationary = false;
+        stepCount++;
+        double rad = Math.toRadians(dirDeg);
+        posX += stepLenM * Math.sin(rad);
+        posY += stepLenM * Math.cos(rad);
+        posVarX += STEP_PROCESS_NOISE;
+        posVarY += STEP_PROCESS_NOISE;
+        lastStepLengthM = stepLenM;
         recordMotionSample();
+    }
+
+    private void stashPendingStep(double stepLenM, double dirDeg) {
+        pendingStepPresent = true;
+        pendingStepLenM = stepLenM;
+        pendingStepDirDeg = dirDeg;
+    }
+
+    private void commitPendingStep() {
+        pendingStepPresent = false;
+        applyStep(pendingStepLenM, pendingStepDirDeg);
     }
 
     // Zero-velocity-style stationary check: true once the accelerometer
     // magnitude's variance over a short rolling window drops below
     // STATIONARY_THRESHOLD, i.e. the phone isn't actively bouncing with
-    // footsteps. Feeds HEADING_COMPASS_PULL_STATIONARY above; a step
-    // (onStepDetected()) always forces this back to false immediately.
+    // footsteps. Feeds HEADING_COMPASS_PULL_STATIONARY above; a confirmed
+    // step (applyStep()) always forces this back to false immediately --
+    // a merely-pending, unconfirmed peak deliberately does not, so an
+    // isolated jolt can't fake "walking" here either.
     private void processStationaryDetection(float mag) {
         accelWindow[accelWindowIdx] = mag;
         accelWindowIdx = (accelWindowIdx + 1) % accelWindow.length;
@@ -414,6 +475,8 @@ public class MappingCollector {
     public int getStepCount() { return stepCount; }
     public double getPosX() { return posX; }
     public double getPosY() { return posY; }
+    public boolean isStationary() { return isStationary; }
+    public boolean isInGaitStreak() { return inGaitStreak; }
 
     public float getPressureHpa() { return pressureHpa; }
     public int getLastTopRssi() { return lastTopRssi; }
@@ -514,6 +577,8 @@ public class MappingCollector {
         lastGyroTimestampNs = 0;
         accelMinInStep = Float.MAX_VALUE;
         accelMaxInStep = -Float.MAX_VALUE;
+        inGaitStreak = false;
+        pendingStepPresent = false;
         sessionId = db.startSession();
 
         ctx.registerReceiver(scanReceiver, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));

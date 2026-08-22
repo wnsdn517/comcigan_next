@@ -1908,9 +1908,11 @@ public class MainActivity extends Activity {
         mappingSensorText.setText(String.format(Locale.KOREA,
                 "방위(heading) %.0f°  기울기(pitch) %.0f°  좌우기울기(roll) %.0f°\n" +
                         "걸음 수 %d  위치 (%.1f, %.1f) m ±%.1fm  원점에서 %.1fm\n" +
-                        "추정 층 변화 %+d층  화면 방향 %d°  GPS %s",
+                        "추정 층 변화 %+d층  화면 방향 %d°  GPS %s\n" +
+                        "정지 상태 %s  보행 확정 %s",
                 heading, pitch, roll, steps, x, y, running.getPositionUncertaintyM(), dist,
-                running.getEstimatedFloorDelta(), running.getScreenRotationDeg(), gps));
+                running.getEstimatedFloorDelta(), running.getScreenRotationDeg(), gps,
+                running.isStationary() ? "예" : "아니오", running.isInGaitStreak() ? "예" : "아니오"));
         if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
         if (mappingStrideText != null) {
             mappingStrideText.setText(String.format(Locale.KOREA,
