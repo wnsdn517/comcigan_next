@@ -4,10 +4,10 @@ plugins {
 
 // Release signing: if a keystore is provided via environment variables
 // (e.g. from CI secrets), the release build is signed with it. Otherwise
-// it falls back to AGP's auto-generated debug keystore so the release
-// build is ALWAYS signed and installable -- an unsigned APK can't be
-// installed on a real device at all (Android rejects it outright), which
-// is exactly what was happening before this fallback existed.
+// it falls back to the fixed debug keystore below so the release build
+// is ALWAYS signed and installable -- an unsigned APK can't be installed
+// on a real device at all (Android rejects it outright), which is
+// exactly what was happening before this fallback existed.
 def releaseKeystorePath = System.getenv('RELEASE_KEYSTORE_FILE')
 def hasReleaseSigning = releaseKeystorePath != null && file(releaseKeystorePath).exists()
 
@@ -23,8 +23,26 @@ android {
         versionName '1.0'
     }
 
-    if (hasReleaseSigning) {
-        signingConfigs {
+    signingConfigs {
+        // AGP's implicit debug signingConfig uses whatever debug.keystore
+        // happens to exist on the machine running the build -- on CI that
+        // is a fresh, ephemeral keystore generated on every single run, so
+        // every CI-built debug/release-fallback APK ends up signed with a
+        // different certificate and installing over the previous build
+        // fails with a signature mismatch. Pointing "debug" at this fixed,
+        // repo-committed keystore instead means every build (local or CI)
+        // is signed identically, so `adb install -r` / a normal reinstall
+        // always works without uninstalling first. Not a secret: this is
+        // exactly the same purpose (and even the same conventional
+        // alias/passwords) as Android's own auto-generated debug keystore,
+        // just checked in so it's the same file everywhere.
+        debug {
+            storeFile file('keystore/debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+        if (hasReleaseSigning) {
             release {
                 storeFile file(releaseKeystorePath)
                 storePassword System.getenv('RELEASE_KEYSTORE_PASSWORD')

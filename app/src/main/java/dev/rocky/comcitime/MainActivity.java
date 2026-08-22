@@ -79,11 +79,16 @@ public class MainActivity extends Activity {
     private TextView mealStatusText;
     private LinearLayout mealContent;
 
-    private MappingCollector mappingCollector;
-    private TextView mappingStatusText, mappingCountsText;
+    private TextView mappingStatusText, mappingCountsText, mappingSensorText, mappingStrideText;
+    private Button mappingGrantBtn;
     private EditText mappingFloorInput, mappingLabelInput;
+    private OrientationGizmoView mappingGizmoView;
+    private MappingPathView mappingPathView;
+    private SparklineView accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph, gyroYawGraph;
     private Runnable pendingMappingStart;
     private static final int REQ_MAPPING_PERMS = 2;
+    private final Handler mappingTickHandler = new Handler();
+    private Runnable mappingTick;
 
     private FrameLayout onboardingOverlay;
 
@@ -95,20 +100,6 @@ public class MainActivity extends Activity {
         UiKit.init(this);
         prefs = new Prefs(this);
         NotificationHelper.ensureChannels(this);
-        mappingCollector = new MappingCollector(this);
-        mappingCollector.setListener(new MappingCollector.Listener() {
-            @Override
-            public void onScanCount(int count) {
-                refreshMappingStatus();
-            }
-
-            @Override
-            public void onHeadingSteps(float headingDeg, int steps) {
-                if (mappingStatusText != null) {
-                    mappingStatusText.setText("켜짐 · " + steps + "걸음 · 방향 " + Math.round(headingDeg) + "°");
-                }
-            }
-        });
 
         FrameLayout rootFrame = new FrameLayout(this);
         rootFrame.setBackgroundColor(UiKit.BG);
@@ -134,6 +125,22 @@ public class MainActivity extends Activity {
         if (prefs.onboardingDone() && prefs.mappingConsentDone()) {
             onboardingOverlay.setVisibility(View.GONE);
             requestNotifPermissionIfNeeded();
+            startMappingServiceIfPermitted();
+        }
+    }
+
+    // Indoor-mapping data collection is an always-on background service,
+    // not a manual toggle -- it runs for as long as the user has consented
+    // AND actually granted the permissions it needs. Called once right
+    // after onboarding consent (after requesting those permissions) and
+    // again on every app launch while already consented, in case the
+    // service got killed by the OS or permissions were only granted later.
+    private void startMappingServiceIfPermitted() {
+        boolean fineLocation = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        boolean activityRecognition = Build.VERSION.SDK_INT < 29
+                || checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED;
+        if (fineLocation && activityRecognition) {
+            startForegroundService(new Intent(this, MappingService.class));
         }
     }
 
@@ -178,12 +185,6 @@ public class MainActivity extends Activity {
         pendingMappingStart = null;
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (mappingCollector != null) mappingCollector.stop();
-    }
-
     private LinearLayout buildBottomNav() {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.HORIZONTAL);
@@ -226,9 +227,14 @@ public class MainActivity extends Activity {
             tabButtons[i].setBackground(active ? activeTabBg() : null);
         }
         nowPanelHandler.removeCallbacksAndMessages(null);
+        mappingTickHandler.removeCallbacksAndMessages(null);
         if (index == 0) { loadAllWeeks(); tickNowPanel(); }
         if (index == 1) refreshMeal();
-        if (index == 2) { refreshColorsList(); refreshMappingStatus(); }
+        if (index == 2) {
+            refreshColorsList();
+            refreshMappingStatus();
+            if (accMapping != null && accMapping.getVisibility() == View.VISIBLE) startMappingTick();
+        }
     }
 
     private FrameLayout buildOnboardingOverlay() {
@@ -267,7 +273,7 @@ public class MainActivity extends Activity {
         permCard.addView(onboardingLine("정확한 알람", "설정하신 시각에 알림이 오차 없이 정확히 오도록 사용해요."));
         permCard.addView(onboardingLine("기기 재시작 시 실행", "기기를 껐다 켜도 예약해둔 알림이 계속 동작하도록 사용해요."));
         permCard.addView(onboardingLine("포그라운드 서비스 (Live Notify)", "설정에서 Live Notify를 켜면, 지금 몇 교시인지 상단바에 계속 표시하기 위해 사용해요. 끄면 사용하지 않아요."));
-        permCard.addView(onboardingLine("위치/동작 (실내 지도 제작, 실험 기능)", "설정의 \"실내 지도 만들기\"를 직접 시작했을 때만, 학교 실내 위치 지도를 만들기 위해 Wi-Fi 신호 세기와 걸음/방향 정보를 수집해요. 이 정보는 특정 인물과 연결되지 않는 익명 데이터이고, 서버로 보내지 않고 이 기기에만 저장돼요."));
+        permCard.addView(onboardingLine("위치/동작 (실내 지도 제작, 실험 기능)", "학교 실내 위치 지도를 만들기 위해, 걸음/방향 정보와 Wi-Fi 신호 세기를 백그라운드에서 항상 자동으로 수집해요 (켜고 끄는 기능이 아니에요). 이 정보는 특정 인물과 연결되지 않는 익명 데이터이고, 서버로 보내지 않고 이 기기에만 저장돼요. 동의하지 않으면 앱을 사용할 수 없어요."));
         root.addView(permCard, cardLp());
 
         CheckBox agree = new CheckBox(this);
@@ -293,6 +299,7 @@ public class MainActivity extends Activity {
             prefs.setMappingConsentDone(true);
             onboardingOverlay.setVisibility(View.GONE);
             requestNotifPermissionIfNeeded();
+            requestMappingPermissionsIfNeeded(this::startMappingServiceIfPermitted);
         });
 
         scroll.addView(root);
@@ -400,7 +407,17 @@ public class MainActivity extends Activity {
 
     private void renderNowPanel() {
         if (nowPanel == null) return;
-        if (prefs.schoolCode().isEmpty() || weekSections.isEmpty() || viewingTeacherName != null) {
+        // INVISIBLE (not GONE) specifically for teacher-view mode: GONE
+        // collapses the panel's height, which reflows everything below it
+        // -- including the week grid the user may still be mid-gesture on
+        // -- shifting it under their finger. INVISIBLE keeps the space
+        // reserved so nothing else on the page moves. The other early-outs
+        // below use GONE since they're not part of an interactive gesture.
+        if (viewingTeacherName != null) {
+            nowPanel.setVisibility(View.INVISIBLE);
+            return;
+        }
+        if (prefs.schoolCode().isEmpty() || weekSections.isEmpty()) {
             nowPanel.setVisibility(View.GONE);
             return;
         }
@@ -1326,8 +1343,42 @@ public class MainActivity extends Activity {
                 content.setVisibility(View.VISIBLE);
                 UiKit.popIn(content);
             }
+            mappingTickHandler.removeCallbacksAndMessages(null);
+            if (accMapping != null && accMapping.getVisibility() == View.VISIBLE) startMappingTick();
         });
         return b;
+    }
+
+    // Keeps the live sensor readout / 3D gizmo / raw-data graphs updating
+    // at MAPPING_TICK_MS, but only while the mapping accordion section is
+    // actually visible -- torn down on every tab switch or accordion
+    // toggle above so it's never ticking in the background for no reason.
+    // The DB-backed bits (status/counts/path drawing) only need a fraction
+    // of that rate: querying SQLite on the main thread every ~300ms would
+    // risk visible jank, so those refresh every MAPPING_SLOW_TICKS ticks
+    // instead, while everything else here reads straight off the live
+    // MappingCollector's in-memory fields.
+    private static final long MAPPING_TICK_MS = 300;
+    private static final int MAPPING_SLOW_TICKS = 7; // ~every 2.1s
+
+    private void startMappingTick() {
+        if (mappingTick == null) {
+            mappingTick = new Runnable() {
+                int tickCount = 0;
+                @Override
+                public void run() {
+                    if (tickCount % MAPPING_SLOW_TICKS == 0) {
+                        refreshMappingStatus();
+                    } else {
+                        updateMappingLiveViews();
+                    }
+                    tickCount++;
+                    mappingTickHandler.postDelayed(this, MAPPING_TICK_MS);
+                }
+            };
+        }
+        mappingTickHandler.removeCallbacks(mappingTick);
+        mappingTickHandler.post(mappingTick);
     }
 
     private LinearLayout buildSchoolSection() {
@@ -1600,7 +1651,7 @@ public class MainActivity extends Activity {
         LinearLayout infoCard = card();
         infoCard.addView(eyebrow("실내 지도 데이터 수집 (실험 기능)"));
         TextView desc = new TextView(this);
-        desc.setText("학교 실내 위치 지도를 만들기 위한 테스트 기능이에요. 시작을 누르고 걸어 다니기만 하면 걸음 수와 방향으로 이동 경로를 자동으로 계산해서 Wi-Fi 신호 세기와 함께 기록해요 (수동으로 위치를 입력할 필요 없어요). 서버로 보내지 않고, 특정 인물과 연결되지 않는 익명 데이터로 이 기기에만 저장해요.");
+        desc.setText("학교 실내 위치 지도를 만들기 위해 걸음 수와 방향, Wi-Fi 신호 세기를 백그라운드에서 항상 자동으로 기록해요 (수동으로 켜고 끄는 기능이 아니에요). 서버로 보내지 않고, 특정 인물과 연결되지 않는 익명 데이터로 이 기기에만 저장해요. 동의하지 않으면 앱을 사용할 수 없어요.");
         UiKit.styleCaption(desc);
         desc.setPadding(0, dp(6), 0, 0);
         infoCard.addView(desc);
@@ -1609,29 +1660,111 @@ public class MainActivity extends Activity {
         LinearLayout statusCard = card();
         mappingStatusText = new TextView(this);
         UiKit.styleBody(mappingStatusText);
-        mappingStatusText.setText("꺼짐");
+        mappingStatusText.setText("확인하는 중...");
         statusCard.addView(mappingStatusText);
 
-        Button toggleBtn = new Button(this);
-        toggleBtn.setText("매핑 시작");
-        UiKit.stylePrimaryButton(toggleBtn);
-        LinearLayout.LayoutParams toggleLp = matchWrap();
-        toggleLp.topMargin = dp(10);
-        toggleBtn.setOnClickListener(v -> {
-            if (mappingCollector.isRunning()) {
-                mappingCollector.stop();
-                toggleBtn.setText("매핑 시작");
-                refreshMappingStatus();
-            } else {
-                requestMappingPermissionsIfNeeded(() -> {
-                    mappingCollector.start();
-                    toggleBtn.setText("매핑 중지");
-                    refreshMappingStatus();
-                });
-            }
-        });
-        statusCard.addView(toggleBtn, toggleLp);
+        mappingGrantBtn = new Button(this);
+        mappingGrantBtn.setText("권한 허용하고 시작");
+        UiKit.stylePrimaryButton(mappingGrantBtn);
+        LinearLayout.LayoutParams grantLp = matchWrap();
+        grantLp.topMargin = dp(10);
+        mappingGrantBtn.setOnClickListener(v -> requestMappingPermissionsIfNeeded(() -> {
+            startMappingServiceIfPermitted();
+            refreshMappingStatus();
+        }));
+        statusCard.addView(mappingGrantBtn, grantLp);
         section.addView(statusCard, cardLp());
+
+        LinearLayout sensorCard = card();
+        sensorCard.addView(eyebrow("실시간 센서 값 (3D)"));
+        mappingGizmoView = new OrientationGizmoView(this);
+        LinearLayout.LayoutParams gizmoLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(160));
+        gizmoLp.topMargin = dp(8);
+        sensorCard.addView(mappingGizmoView, gizmoLp);
+        mappingSensorText = new TextView(this);
+        UiKit.styleCaption(mappingSensorText);
+        mappingSensorText.setTypeface(Typeface.MONOSPACE);
+        mappingSensorText.setText("수집 중이 아니에요.");
+        LinearLayout.LayoutParams sensorTextLp = matchWrap();
+        sensorTextLp.topMargin = dp(8);
+        sensorCard.addView(mappingSensorText, sensorTextLp);
+        section.addView(sensorCard, cardLp());
+
+        LinearLayout pathCard = card();
+        pathCard.addView(eyebrow("이동 경로 (3D 평면도)"));
+        mappingPathView = new MappingPathView(this);
+        LinearLayout.LayoutParams pathLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(220));
+        pathLp.topMargin = dp(8);
+        pathCard.addView(mappingPathView, pathLp);
+        TextView pathLegend = new TextView(this);
+        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치");
+        UiKit.styleCaption(pathLegend);
+        pathLegend.setPadding(0, dp(4), 0, 0);
+        pathCard.addView(pathLegend);
+        section.addView(pathCard, cardLp());
+
+        LinearLayout rawCard = card();
+        rawCard.addView(eyebrow("실제 원시 센서 데이터 (축별 변화 그래프)"));
+        TextView rawLegend = new TextView(this);
+        rawLegend.setText("X 빨강 · Y 초록 · Z 파랑");
+        UiKit.styleCaption(rawLegend);
+        rawCard.addView(rawLegend);
+        accelGraph = new SparklineView(this, "🚶 가속도계", " m/s²");
+        gyroGraph = new SparklineView(this, "🧭 자이로스코프", " rad/s");
+        magGraph = new SparklineView(this, "🧭 자기장 센서", " μT");
+        pressureGraph = new SparklineView(this, "📏 기압계", " hPa");
+        rssiGraph = new SparklineView(this, "📶 Wi-Fi 최강 신호", " dBm");
+        for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph}) {
+            LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
+            glp.topMargin = dp(6);
+            rawCard.addView(gv, glp);
+        }
+        section.addView(rawCard, cardLp());
+
+        LinearLayout gyroYawCard = card();
+        gyroYawCard.addView(eyebrow("자이로 적분 방향 (보폭 계산과 별개)"));
+        TextView gyroYawHint = new TextView(this);
+        gyroYawHint.setText("나침반 보정 없이 자이로스코프만으로 적분한 방향이에요. 크게 튀거나 계속 한쪽으로 쏠리면 드리프트가 커지고 있다는 뜻이에요.");
+        UiKit.styleCaption(gyroYawHint);
+        gyroYawHint.setPadding(0, dp(2), 0, 0);
+        gyroYawCard.addView(gyroYawHint);
+        gyroYawGraph = new SparklineView(this, "🧭 자이로 전용 방향", "°");
+        LinearLayout.LayoutParams gyroYawLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
+        gyroYawLp.topMargin = dp(8);
+        gyroYawCard.addView(gyroYawGraph, gyroYawLp);
+        section.addView(gyroYawCard, cardLp());
+
+        LinearLayout strideCard = card();
+        strideCard.addView(eyebrow("원점 기준 이동 거리 계산"));
+        TextView strideHint = new TextView(this);
+        strideHint.setText("걸음마다 가속도 변화폭으로 보폭을 자동 추정하고(고정값 입력 없음), 방향은 자기장 왜곡에 취약한 나침반 대신 자이로스코프를 적분해서 따라가요. Wi-Fi 스캔이 지문 지도와 맞을 때마다 위치를 살짝 보정해요.");
+        UiKit.styleCaption(strideHint);
+        strideHint.setPadding(0, dp(2), 0, 0);
+        strideCard.addView(strideHint);
+        mappingStrideText = new TextView(this);
+        UiKit.styleBody(mappingStrideText);
+        mappingStrideText.setTypeface(Typeface.MONOSPACE);
+        LinearLayout.LayoutParams strideTextLp = matchWrap();
+        strideTextLp.topMargin = dp(8);
+        strideCard.addView(mappingStrideText, strideTextLp);
+        Button resetOriginBtn = new Button(this);
+        resetOriginBtn.setText("원점 재설정 (현재 위치를 0,0으로)");
+        resetOriginBtn.setTextSize(12);
+        UiKit.styleSecondaryButton(resetOriginBtn);
+        LinearLayout.LayoutParams resetLp = matchWrap();
+        resetLp.topMargin = dp(8);
+        resetOriginBtn.setOnClickListener(v -> {
+            MappingCollector running = MappingService.getRunningCollector();
+            if (running == null) {
+                Toast.makeText(this, "아직 백그라운드 수집이 시작되지 않았어요.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            running.resetOrigin();
+            Toast.makeText(this, "원점을 재설정했어요.", Toast.LENGTH_SHORT).show();
+            refreshMappingStatus();
+        });
+        strideCard.addView(resetOriginBtn, resetLp);
+        section.addView(strideCard, cardLp());
 
         LinearLayout waypointCard = card();
         waypointCard.addView(eyebrow("위치 이름표 (선택)"));
@@ -1661,8 +1794,9 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams waypointLp = matchWrap();
         waypointLp.topMargin = dp(8);
         waypointBtn.setOnClickListener(v -> {
-            if (!mappingCollector.isRunning()) {
-                Toast.makeText(this, "먼저 매핑을 시작해주세요.", Toast.LENGTH_SHORT).show();
+            MappingCollector running = MappingService.getRunningCollector();
+            if (running == null) {
+                Toast.makeText(this, "아직 백그라운드 수집이 시작되지 않았어요.", Toast.LENGTH_SHORT).show();
                 return;
             }
             String floor = mappingFloorInput.getText().toString().trim();
@@ -1671,7 +1805,7 @@ public class MainActivity extends Activity {
                 Toast.makeText(this, "위치를 입력해주세요.", Toast.LENGTH_SHORT).show();
                 return;
             }
-            mappingCollector.addWaypoint(floor, label);
+            running.addWaypoint(floor, label);
             mappingLabelInput.setText("");
             Toast.makeText(this, "표시했어요: " + floor + " " + label, Toast.LENGTH_SHORT).show();
             refreshMappingStatus();
@@ -1685,14 +1819,180 @@ public class MainActivity extends Activity {
         countsLp.topMargin = dp(4);
         section.addView(mappingCountsText, countsLp);
 
+        Button apEstimatesBtn = new Button(this);
+        apEstimatesBtn.setText("추정된 Wi-Fi 위치 보기");
+        apEstimatesBtn.setTextSize(11);
+        UiKit.styleSecondaryButton(apEstimatesBtn);
+        LinearLayout.LayoutParams apBtnLp = matchWrap();
+        apBtnLp.topMargin = dp(8);
+        apEstimatesBtn.setOnClickListener(v -> showApEstimatesDialog());
+        section.addView(apEstimatesBtn, apBtnLp);
+
         return section;
     }
 
     private void refreshMappingStatus() {
-        if (mappingStatusText == null || mappingCollector == null) return;
-        if (!mappingCollector.isRunning()) mappingStatusText.setText("꺼짐");
-        MappingDb.Counts c = mappingCollector.counts();
-        mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans + "개 · 이름표 " + c.waypoints + "개");
+        if (mappingStatusText == null) return;
+        boolean running = MappingService.getRunningCollector() != null;
+        boolean permitted = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                && (Build.VERSION.SDK_INT < 29 || checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED);
+        if (running) {
+            mappingStatusText.setText("🟢 백그라운드에서 항상 수집 중");
+            mappingGrantBtn.setVisibility(View.GONE);
+        } else if (permitted) {
+            mappingStatusText.setText("권한은 있지만 아직 시작 전이에요.");
+            mappingGrantBtn.setText("지금 시작");
+            mappingGrantBtn.setVisibility(View.VISIBLE);
+        } else {
+            mappingStatusText.setText("권한이 필요해요.");
+            mappingGrantBtn.setText("권한 허용하고 시작");
+            mappingGrantBtn.setVisibility(View.VISIBLE);
+        }
+        MappingDb mappingDb = new MappingDb(this);
+        MappingDb.Counts c = mappingDb.counts();
+        int fingerprints = mappingDb.fingerprintCount();
+        mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans
+                + "개 · 지문(위치별 스캔) " + fingerprints + "개 · 이름표 " + c.waypoints + "개");
+        updateMappingLiveViews();
+        refreshMappingPathView();
+    }
+
+    // DB-backed, so only called from the slow tick (see MAPPING_SLOW_TICKS)
+    // instead of every fast tick like updateMappingLiveViews() below.
+    private void refreshMappingPathView() {
+        if (mappingPathView == null) return;
+        MappingDb mappingDb = new MappingDb(this);
+        mappingPathView.setApEstimates(mappingDb.estimateApPositions(3, 30));
+        MappingCollector running = MappingService.getRunningCollector();
+        if (running == null) {
+            mappingPathView.setPath(new ArrayList<>(), 0, 0);
+            return;
+        }
+        List<double[]> path = mappingDb.recentPath(300);
+        mappingPathView.setPath(path, running.getPosX(), running.getPosY());
+    }
+
+    // Pulls the current heading/pitch/roll/step/position readout, 3D
+    // gizmo, and raw-data graphs straight from the live collector's
+    // in-memory fields -- no DB hit, so this is cheap enough to call at
+    // MAPPING_TICK_MS. The path drawing needs actual history from the DB;
+    // see refreshMappingPathView() above for that slower-cadence piece.
+    private void updateMappingLiveViews() {
+        if (mappingSensorText == null) return;
+        MappingCollector running = MappingService.getRunningCollector();
+        if (running == null) {
+            mappingSensorText.setText("수집 중이 아니에요.");
+            if (mappingStrideText != null) mappingStrideText.setText("");
+            if (mappingGizmoView != null) mappingGizmoView.setOrientation(0, 0, 0);
+            for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph, gyroYawGraph}) {
+                if (gv != null) gv.setSeries(new ArrayList<>(), 0);
+            }
+            return;
+        }
+        float heading = running.getHeadingDeg();
+        float pitch = running.getPitchDeg();
+        float roll = running.getRollDeg();
+        int steps = running.getStepCount();
+        double x = running.getPosX();
+        double y = running.getPosY();
+        double dist = Math.sqrt(x * x + y * y);
+        String gps = Double.isNaN(running.getLastLat()) ? "미확보"
+                : String.format(Locale.KOREA, "%.5f, %.5f", running.getLastLat(), running.getLastLon());
+        mappingSensorText.setText(String.format(Locale.KOREA,
+                "방위(heading) %.0f°  기울기(pitch) %.0f°  좌우기울기(roll) %.0f°\n" +
+                        "걸음 수 %d  위치 (%.1f, %.1f) m ±%.1fm  원점에서 %.1fm\n" +
+                        "추정 층 변화 %+d층  화면 방향 %d°  GPS %s",
+                heading, pitch, roll, steps, x, y, running.getPositionUncertaintyM(), dist,
+                running.getEstimatedFloorDelta(), running.getScreenRotationDeg(), gps));
+        if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
+        if (mappingStrideText != null) {
+            mappingStrideText.setText(String.format(Locale.KOREA,
+                    "최근 걸음 보폭(자동 추정) %.2fm  ·  방향 소스: 자이로 적분",
+                    running.getLastStepLengthM()));
+        }
+
+        running.pushRawHistorySample();
+        int histCount = running.getHistoryCount();
+        final int RED = 0xFFFF7A7A, GREEN = 0xFF57C785, BLUE = 0xFF5B8CFF;
+        if (accelGraph != null) accelGraph.setSeries(java.util.Arrays.asList(
+                new SparklineView.Series(running.getAccelXHistory(), RED, "X"),
+                new SparklineView.Series(running.getAccelYHistory(), GREEN, "Y"),
+                new SparklineView.Series(running.getAccelZHistory(), BLUE, "Z")), histCount);
+        if (gyroGraph != null) gyroGraph.setSeries(java.util.Arrays.asList(
+                new SparklineView.Series(running.getGyroXHistory(), RED, "X"),
+                new SparklineView.Series(running.getGyroYHistory(), GREEN, "Y"),
+                new SparklineView.Series(running.getGyroZHistory(), BLUE, "Z")), histCount);
+        if (magGraph != null) magGraph.setSeries(java.util.Arrays.asList(
+                new SparklineView.Series(running.getMagXHistory(), RED, "X"),
+                new SparklineView.Series(running.getMagYHistory(), GREEN, "Y"),
+                new SparklineView.Series(running.getMagZHistory(), BLUE, "Z")), histCount);
+        if (pressureGraph != null) pressureGraph.setSeries(java.util.Collections.singletonList(
+                new SparklineView.Series(running.getPressureHistory(), 0xFFF2B94C, null)), histCount);
+        if (rssiGraph != null) rssiGraph.setSeries(java.util.Collections.singletonList(
+                new SparklineView.Series(running.getRssiHistory(), 0xFFB57BFF, null)), histCount);
+        if (gyroYawGraph != null) gyroYawGraph.setSeries(java.util.Collections.singletonList(
+                new SparklineView.Series(running.getGyroYawHistory(), 0xFF4CD3C2, null)), histCount);
+    }
+
+    // Shows each Wi-Fi access point's estimated position (RSSI-weighted
+    // centroid of every spot it was observed from -- see
+    // MappingDb.estimateApPositions) as a quick sanity check on the
+    // collected data, ranked by how many times it's been seen.
+    private void showApEstimatesDialog() {
+        List<MappingDb.ApEstimate> estimates = new MappingDb(this).estimateApPositions(3, 30);
+        Dialog dialog = new Dialog(this);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackground(UiKit.card());
+        root.setPadding(dp(16), dp(16), dp(16), dp(16));
+
+        TextView title = new TextView(this);
+        title.setText("추정된 Wi-Fi 위치");
+        title.setTextColor(UiKit.TEXT_PRIMARY);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextSize(16);
+        title.setPadding(0, 0, 0, dp(4));
+        root.addView(title);
+
+        TextView hint = new TextView(this);
+        hint.setText("세션 시작 지점 기준 상대 좌표(m). 최소 3번 이상 관측된 AP만 표시해요.");
+        UiKit.styleCaption(hint);
+        hint.setPadding(0, 0, 0, dp(10));
+        root.addView(hint);
+
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        if (estimates.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("아직 추정할 만큼 데이터가 모이지 않았어요.");
+            UiKit.styleCaption(empty);
+            list.addView(empty);
+        } else {
+            for (MappingDb.ApEstimate est : estimates) {
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.VERTICAL);
+                row.setPadding(0, dp(6), 0, dp(6));
+                TextView bssidText = new TextView(this);
+                bssidText.setText(est.bssid);
+                bssidText.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                bssidText.setTextColor(UiKit.TEXT_PRIMARY);
+                bssidText.setTextSize(13);
+                row.addView(bssidText);
+                TextView detail = new TextView(this);
+                detail.setText(String.format(Locale.KOREA, "(%.1f, %.1f) · 관측 %d회 · 평균 %.0fdBm",
+                        est.x, est.y, est.observations, est.avgRssi));
+                UiKit.styleCaption(detail);
+                row.addView(detail);
+                list.addView(row);
+            }
+        }
+        scroll.addView(list);
+        root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(400)));
+
+        dialog.setContentView(root);
+        if (dialog.getWindow() != null) dialog.getWindow().setBackgroundDrawable(new ColorDrawable(0));
+        dialog.show();
     }
 
     private AutoCompleteTextView makePickerInput(String[] options) {
@@ -1933,7 +2233,7 @@ public class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams cardLp() {
         LinearLayout.LayoutParams lp = matchWrap();
-        lp.bottomMargin = dp(12);
+        lp.bottomMargin = dp(16);
         return lp;
     }
 
