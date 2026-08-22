@@ -128,6 +128,7 @@ public class Prefs {
     public boolean mappingConsentDone() { return sp.getBoolean("mappingConsentDone", false); }
     public void setMappingConsentDone(boolean v) { sp.edit().putBoolean("mappingConsentDone", v).apply(); }
 
+
     // ---------- NEIS (optional meal info) ----------
     public String neisApiKey() { return sp.getString("neisKey", ""); }
     public void setNeisApiKey(String key) { sp.edit().putString("neisKey", key).apply(); }

@@ -41,7 +41,7 @@ import java.util.concurrent.Executors;
 //    furniture, so a compass heading can be badly wrong right where this
 //    matters most. Instead, direction is tracked by integrating the raw
 //    gyroscope's yaw rate (gyroYawDeg below), only softly pulled toward
-//    the fused heading a couple percent per reading (HEADING_COMPASS_PULL)
+//    the fused heading a few percent per reading (HEADING_COMPASS_PULL)
 //    -- immune to any single bad magnetometer reading, but still bounded
 //    so per-sample gyro bias can't compound into unlimited drift over a
 //    long walk, with the Wi-Fi fingerprint correction below as a second
@@ -51,6 +51,17 @@ import java.util.concurrent.Executors;
 //    know precisely. Instead each step's length is estimated from that
 //    step's own accelerometer swing via Weinberg's formula (see
 //    estimateStepLength()), a standard step-length-estimation technique.
+//
+// Steps themselves come from a custom accelerometer peak-detector
+// (processCustomStepDetection()) instead of the platform's hardware
+// TYPE_STEP_DETECTOR, which on many devices has a noticeable detection
+// lag -- the custom detector fires the instant a step's peak crosses
+// threshold, so the position update tracks actual footfalls more
+// closely. A lightweight zero-velocity-style stationary detector
+// (processStationaryDetection(), based on short-window accelerometer
+// variance) also lets heading correction pull faster toward the compass
+// while the phone is known to be still, when a compass reading isn't
+// being muddied by step-related vibration.
 //
 // The resulting trajectory only needs to be locally consistent, not
 // metrically perfect: every Wi-Fi scan is tagged with the position dead
@@ -117,10 +128,16 @@ public class MappingCollector {
     private double gyroYawDeg = Double.NaN;
     private long lastGyroTimestampNs = 0;
     // Fraction of the gyro-vs-compass heading gap corrected per fused-
-    // gyro-vs-compass heading gap corrected per fused-
-    // heading update (~SENSOR_DELAY_UI, tens of ms) -- increased slightly
-    // to catch up with drift faster since gyro sign is now fixed.
+    // heading update (~SENSOR_DELAY_UI, tens of ms). Bumped up from an
+    // initial 0.02 once the gyro's CW/CCW sign convention was fixed (see
+    // the TYPE_GYROSCOPE case below) -- with the sign right, a larger
+    // pull catches up to the compass faster without overshooting.
     private static final double HEADING_COMPASS_PULL = 0.05;
+    // While the phone is detected stationary (see processStationaryDetection()),
+    // pull harder toward the compass heading -- a compass reading isn't
+    // being muddied by step-related vibration/magnetic noise right then,
+    // so it's safe to trust more.
+    private static final double HEADING_COMPASS_PULL_STATIONARY = 0.15;
 
     // Running min/max of accelerometer magnitude since the last step,
     // feeding Weinberg's per-step dynamic stride-length estimate (see
@@ -141,17 +158,19 @@ public class MappingCollector {
     // described in the class doc.
     private java.util.Map<String, Integer> lastScanRssi = new java.util.HashMap<>();
 
-    // Custom Step Detection (Peak Detection) variables
+    // Custom low-latency step detector (accelerometer peak detection),
+    // used instead of the platform's TYPE_STEP_DETECTOR -- see class doc.
     private static final float PEAK_THRESHOLD = 1.2f; // m/s^2 above gravity
     private static final long STEP_COOLDOWN_MS = 250;
     private long lastStepTimeMs = 0;
-    private float lastAccelMag = 0f;
     private boolean peakSearching = true;
 
-    // Stationary Detection (ZUPT) variables
+    // Stationary detection (short-window accelerometer variance), used to
+    // trust the compass more while the phone is known to be still -- see
+    // class doc and HEADING_COMPASS_PULL_STATIONARY above.
     private static final float STATIONARY_THRESHOLD = 0.08f; // m/s^2 variance
     private boolean isStationary = true;
-    private final float[] accelWindow = new float[10]; // Small window for variance
+    private final float[] accelWindow = new float[10];
     private int accelWindowIdx = 0;
 
     // ---- lower-priority raw signals (see class doc): latest value only,
@@ -230,24 +249,27 @@ public class MappingCollector {
                         // many minutes, which is what a walked loop not
                         // closing on itself looks like. The weight is kept
                         // small so a single bad indoor-magnetic reading
-                        // can't yank heading off course either.
+                        // can't yank heading off course either, except
+                        // while stationary (see field doc) when it's safe
+                        // to trust the compass more.
                         double diff = shortestAngleDiffDeg(headingDeg, gyroYawDeg);
-                        double pull = isStationary ? 0.15 : HEADING_COMPASS_PULL;
+                        double pull = isStationary ? HEADING_COMPASS_PULL_STATIONARY : HEADING_COMPASS_PULL;
                         gyroYawDeg = ((gyroYawDeg + diff * pull) % 360 + 360) % 360;
                     }
                     break;
                 case Sensor.TYPE_STEP_DETECTOR:
-                    // Using custom step detection for zero-latency, 
-                    // but still recording it if the hardware fires just in case.
-                    // Actually, to avoid double counting, let's ignore hardware steps if custom is active.
-                    // stepCount++; ... (removed)
+                    // Position updates now come from the custom low-latency
+                    // peak detector in processCustomStepDetection() (driven
+                    // off TYPE_ACCELEROMETER below), not this hardware
+                    // event -- kept registered only so a device without a
+                    // usable accelerometer stream still has a step source,
+                    // but not counted here to avoid double-counting steps.
                     break;
                 case Sensor.TYPE_ACCELEROMETER:
                     accelX = event.values[0]; accelY = event.values[1]; accelZ = event.values[2];
                     accelMag = vectorMag(event.values);
                     accelMinInStep = Math.min(accelMinInStep, accelMag);
                     accelMaxInStep = Math.max(accelMaxInStep, accelMag);
-                    
                     processCustomStepDetection(accelMag);
                     processStationaryDetection(accelMag);
                     break;
@@ -255,8 +277,11 @@ public class MappingCollector {
                     gyroX = event.values[0]; gyroY = event.values[1]; gyroZ = event.values[2];
                     if (lastGyroTimestampNs != 0 && !Double.isNaN(gyroYawDeg)) {
                         double dt = (event.timestamp - lastGyroTimestampNs) / 1_000_000_000.0;
-                        // Android gyro Z is CCW positive, but Azimuth is CW positive.
-                        // Subtracting dYaw aligns them. Always integrate to allow turns while standing.
+                        // Android's gyroscope Z axis is CCW-positive, but
+                        // compass azimuth (headingDeg) is CW-positive --
+                        // subtracting dYaw (instead of adding) aligns the
+                        // two conventions so gyro-integrated turns match
+                        // the direction the compass would report.
                         double dYaw = Math.toDegrees(gyroZ) * dt;
                         gyroYawDeg = ((gyroYawDeg - dYaw) % 360 + 360) % 360;
                     }
@@ -299,6 +324,13 @@ public class MappingCollector {
         return Math.max(0.3, Math.min(1.0, len));
     }
 
+    // Fires the moment the accelerometer magnitude's swing away from
+    // gravity crosses PEAK_THRESHOLD, then waits for it to fall back
+    // before searching for the next peak -- lower latency than the
+    // platform's hardware step detector, which on many devices only
+    // reports a step some tens to hundreds of ms after it actually
+    // happened. STEP_COOLDOWN_MS guards against a single footfall's
+    // vibration registering as more than one step.
     private void processCustomStepDetection(float mag) {
         long now = System.currentTimeMillis();
         float gravity = 9.81f;
@@ -307,14 +339,14 @@ public class MappingCollector {
         if (peakSearching && relativeMag > PEAK_THRESHOLD && (now - lastStepTimeMs) > STEP_COOLDOWN_MS) {
             onStepDetected();
             lastStepTimeMs = now;
-            peakSearching = false; // Cooldown start
+            peakSearching = false;
         } else if (!peakSearching && relativeMag < PEAK_THRESHOLD / 2) {
-            peakSearching = true; // Ready for next peak
+            peakSearching = true;
         }
     }
 
     private void onStepDetected() {
-        isStationary = false; // Force non-stationary on step
+        isStationary = false;
         stepCount++;
         double stepLen = estimateStepLength();
         double dirDeg = Double.isNaN(gyroYawDeg) ? headingDeg : gyroYawDeg;
@@ -329,6 +361,11 @@ public class MappingCollector {
         recordMotionSample();
     }
 
+    // Zero-velocity-style stationary check: true once the accelerometer
+    // magnitude's variance over a short rolling window drops below
+    // STATIONARY_THRESHOLD, i.e. the phone isn't actively bouncing with
+    // footsteps. Feeds HEADING_COMPASS_PULL_STATIONARY above; a step
+    // (onStepDetected()) always forces this back to false immediately.
     private void processStationaryDetection(float mag) {
         accelWindow[accelWindowIdx] = mag;
         accelWindowIdx = (accelWindowIdx + 1) % accelWindow.length;
@@ -341,12 +378,7 @@ public class MappingCollector {
         for (float v : accelWindow) variance += (v - mean) * (v - mean);
         variance /= accelWindow.length;
 
-        boolean wasStationary = isStationary;
         isStationary = variance < STATIONARY_THRESHOLD;
-
-        if (!wasStationary && isStationary) {
-            // Just stopped: could optionally snap to nearest fingerprint or clean gyro bias
-        }
     }
 
     private final Runnable scanTick = new Runnable() {

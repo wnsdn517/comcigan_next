@@ -17,54 +17,56 @@ import android.widget.TextView;
 // blended glow, flat blocks instead of shadows, snappier ease-out motion
 // instead of springy overshoot -- rather than a glossy "modern SaaS" look.
 public class UiKit {
-    public static final int BG = 0xFF1C1B1F; // M3 Dark Surface
-    public static final int SURFACE = 0xFF2B2930; // M3 Surface Container
-    public static final int SURFACE_ALT = 0xFF36343B; // M3 Surface Container High
-    public static final int BORDER = 0xFF49454F; // M3 Outline
-    public static final int TEXT_PRIMARY = 0xFFE6E1E5; // M3 On Surface
-    public static final int TEXT_SECONDARY = 0xFFCAC4D0; // M3 On Surface Variant
-    public static final int ACCENT = 0xFFD0BCFF; // M3 Primary
-    public static final int ACCENT_TEXT = 0xFF381E72; // M3 On Primary
-    public static final int CHANGED = 0xFFF2B8B5; // M3 Error Container
+    public static final int BG = 0xFF14161D;
+    public static final int SURFACE = 0xFF1E212B;
+    public static final int SURFACE_ALT = 0xFF262A36;
+    public static final int BORDER = 0xFF3A4052;
+    public static final int TEXT_PRIMARY = 0xFFEDEEF3;
+    public static final int TEXT_SECONDARY = 0xFF8B90A0;
+    public static final int ACCENT = 0xFFF2B94C;
+    public static final int ACCENT_TEXT = 0xFF14161D;
+    public static final int CHANGED = 0xFFFF6B5E;
 
     public static GradientDrawable card() {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE);
-        d.setCornerRadius(dp(20)); // M3 Medium Card
-        d.setStroke(dp(1), BORDER);
+        d.setCornerRadius(dp(8));
+        d.setStroke(dp2(), BORDER);
         return d;
     }
 
     public static GradientDrawable inputBg() {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE_ALT);
-        d.setCornerRadius(dp(12));
-        d.setStroke(dp(1), BORDER);
+        d.setCornerRadius(dp(6));
+        d.setStroke(dp2(), BORDER);
         return d;
     }
 
     public static GradientDrawable pillOutline() {
         GradientDrawable d = new GradientDrawable();
-        d.setColor(android.graphics.Color.TRANSPARENT);
-        d.setCornerRadius(dp(999));
-        d.setStroke(dp(1), BORDER);
+        d.setColor(SURFACE_ALT);
+        d.setCornerRadius(dp(6));
+        d.setStroke(dp2(), BORDER);
         return d;
     }
 
     public static GradientDrawable pillFilled(int color) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(color);
-        d.setCornerRadius(dp(999));
+        d.setCornerRadius(dp(6));
         return d;
     }
 
     public static StateListDrawable primaryButtonBg() {
         GradientDrawable normal = new GradientDrawable();
         normal.setColor(ACCENT);
-        normal.setCornerRadius(dp(999));
+        normal.setCornerRadius(dp(6));
+        normal.setStroke(dp2(), darken(ACCENT, 0.7f));
         GradientDrawable pressed = new GradientDrawable();
-        pressed.setColor(darken(ACCENT, 0.9f));
-        pressed.setCornerRadius(dp(999));
+        pressed.setColor(darken(ACCENT, 0.85f));
+        pressed.setCornerRadius(dp(6));
+        pressed.setStroke(dp2(), darken(ACCENT, 0.7f));
         StateListDrawable sld = new StateListDrawable();
         sld.addState(new int[]{android.R.attr.state_pressed}, pressed);
         sld.addState(new int[]{}, normal);
@@ -74,12 +76,12 @@ public class UiKit {
     public static StateListDrawable secondaryButtonBg() {
         GradientDrawable normal = new GradientDrawable();
         normal.setColor(SURFACE_ALT);
-        normal.setCornerRadius(dp(999));
-        normal.setStroke(dp(1), BORDER);
+        normal.setStroke(dp2(), BORDER);
+        normal.setCornerRadius(dp(6));
         GradientDrawable pressed = new GradientDrawable();
-        pressed.setColor(darken(SURFACE_ALT, 0.9f));
-        pressed.setCornerRadius(dp(999));
-        pressed.setStroke(dp(1), BORDER);
+        pressed.setColor(darken(SURFACE_ALT, 0.8f));
+        pressed.setStroke(dp2(), BORDER);
+        pressed.setCornerRadius(dp(6));
         StateListDrawable sld = new StateListDrawable();
         sld.addState(new int[]{android.R.attr.state_pressed}, pressed);
         sld.addState(new int[]{}, normal);
@@ -89,18 +91,18 @@ public class UiKit {
     public static void stylePrimaryButton(Button b) {
         b.setBackground(primaryButtonBg());
         b.setTextColor(ACCENT_TEXT);
-        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        b.setTypeface(Typeface.DEFAULT_BOLD);
         b.setAllCaps(false);
-        b.setPadding(dp(24), dp(12), dp(24), dp(12));
-        b.setElevation(dp(2));
+        b.setPadding(dp(16), dp(12), dp(16), dp(12));
+        b.setElevation(0);
         b.setStateListAnimator(null);
     }
 
     public static void styleSecondaryButton(Button b) {
         b.setBackground(secondaryButtonBg());
-        b.setTextColor(ACCENT); // M3 Tonal/Outlined often uses primary color for text
+        b.setTextColor(TEXT_PRIMARY);
         b.setAllCaps(false);
-        b.setPadding(dp(24), dp(12), dp(24), dp(12));
+        b.setPadding(dp(16), dp(12), dp(16), dp(12));
         b.setElevation(0);
         b.setStateListAnimator(null);
     }
@@ -109,27 +111,24 @@ public class UiKit {
         e.setBackground(inputBg());
         e.setTextColor(TEXT_PRIMARY);
         e.setHintTextColor(TEXT_SECONDARY);
-        e.setPadding(dp(16), dp(12), dp(16), dp(12));
+        e.setPadding(dp(12), dp(10), dp(12), dp(10));
     }
 
     public static void styleEyebrow(TextView t) {
         t.setTextColor(ACCENT);
-        t.setTextSize(13);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setLetterSpacing(0.04f);
-        t.setAllCaps(true);
+        t.setTextSize(12);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setLetterSpacing(0.06f);
     }
 
     public static void styleBody(TextView t) {
         t.setTextColor(TEXT_PRIMARY);
-        t.setTextSize(16);
-        t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        t.setTextSize(15);
     }
 
     public static void styleCaption(TextView t) {
         t.setTextColor(TEXT_SECONDARY);
-        t.setTextSize(13);
-        t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        t.setTextSize(12);
     }
 
     public static int darken(int color, float factor) {
@@ -243,4 +242,5 @@ public class UiKit {
     }
 
     public static int dp(int v) { return (int) (v * density); }
+    private static int dp2() { return Math.max(2, (int) (2 * density)); }
 }

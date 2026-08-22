@@ -1,8 +1,11 @@
 package dev.rocky.comcitime;
 
+import android.Manifest;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.os.Build;
 
 public class BootReceiver extends BroadcastReceiver {
     @Override
@@ -15,6 +18,16 @@ public class BootReceiver extends BroadcastReceiver {
                     context.startForegroundService(new Intent(context, LiveNotifyService.class));
                 }
             }
+            if (prefs.mappingConsentDone() && hasMappingPermissions(context)) {
+                context.startForegroundService(new Intent(context, MappingService.class));
+            }
         }
+    }
+
+    private boolean hasMappingPermissions(Context context) {
+        boolean fineLocation = context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
+        boolean activityRecognition = Build.VERSION.SDK_INT < 29
+                || context.checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED;
+        return fineLocation && activityRecognition;
     }
 }
