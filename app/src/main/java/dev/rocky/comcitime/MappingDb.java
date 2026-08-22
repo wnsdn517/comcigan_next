@@ -16,7 +16,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 2;
+    private static final int DB_VERSION = 3;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -39,7 +39,7 @@ public class MappingDb extends SQLiteOpenHelper {
                 "bssid TEXT, rssi INTEGER, freq INTEGER, x REAL, y REAL)");
         db.execSQL("CREATE TABLE motion_samples (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
-                "heading_deg REAL, step_count INTEGER, x REAL, y REAL)");
+                "heading_deg REAL, pitch_deg REAL, roll_deg REAL, step_count INTEGER, x REAL, y REAL)");
         db.execSQL("CREATE TABLE waypoints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "floor TEXT, label TEXT, x REAL, y REAL)");
@@ -79,11 +79,14 @@ public class MappingDb extends SQLiteOpenHelper {
         getWritableDatabase().insert("radio_scans", null, cv);
     }
 
-    public void insertMotionSample(long sessionId, long ts, float headingDeg, int stepCount, double x, double y) {
+    public void insertMotionSample(long sessionId, long ts, float headingDeg, float pitchDeg, float rollDeg,
+                                    int stepCount, double x, double y) {
         ContentValues cv = new ContentValues();
         cv.put("session_id", sessionId);
         cv.put("ts", ts);
         cv.put("heading_deg", headingDeg);
+        cv.put("pitch_deg", pitchDeg);
+        cv.put("roll_deg", rollDeg);
         cv.put("step_count", stepCount);
         cv.put("x", x);
         cv.put("y", y);
@@ -119,6 +122,162 @@ public class MappingDb extends SQLiteOpenHelper {
         try (Cursor cur = db.rawQuery(sql, null)) {
             return cur.moveToFirst() ? cur.getInt(0) : 0;
         }
+    }
+
+    public static class ApEstimate {
+        public String bssid;
+        public double x, y;
+        public int observations;
+        public double avgRssi;
+    }
+
+    // Estimates each observed Wi-Fi access point's position as the RSSI-
+    // power-weighted centroid of every (x, y) position it was seen from --
+    // a standard technique for RF source localization from crowd-sourced
+    // signal-strength readings (weight = 10^(rssi/10), i.e. proportional to
+    // received power, so strong/close readings pull the estimate toward
+    // them far more than weak/far ones). Only computed on demand for a
+    // status screen, not on any hot path, and the whole scan table is
+    // small enough during this experimental phase to aggregate in memory
+    // rather than needing SQL-level math functions SQLite doesn't ship.
+    public List<ApEstimate> estimateApPositions(int minObservations, int limit) {
+        java.util.Map<String, double[]> acc = new java.util.LinkedHashMap<>();
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor cur = db.rawQuery("SELECT bssid, rssi, x, y FROM radio_scans", null)) {
+            while (cur.moveToNext()) {
+                String bssid = cur.getString(0);
+                int rssi = cur.getInt(1);
+                double x = cur.getDouble(2);
+                double y = cur.getDouble(3);
+                double weight = Math.pow(10.0, rssi / 10.0);
+                double[] a = acc.computeIfAbsent(bssid, k -> new double[5]); // wx, wy, wSum, rssiSum, count
+                a[0] += weight * x;
+                a[1] += weight * y;
+                a[2] += weight;
+                a[3] += rssi;
+                a[4] += 1;
+            }
+        }
+        List<ApEstimate> out = new ArrayList<>();
+        for (java.util.Map.Entry<String, double[]> entry : acc.entrySet()) {
+            double[] a = entry.getValue();
+            if (a[4] < minObservations || a[2] <= 0) continue;
+            ApEstimate est = new ApEstimate();
+            est.bssid = entry.getKey();
+            est.x = a[0] / a[2];
+            est.y = a[1] / a[2];
+            est.observations = (int) a[4];
+            est.avgRssi = a[3] / a[4];
+            out.add(est);
+        }
+        out.sort((p, q) -> Integer.compare(q.observations, p.observations));
+        if (out.size() > limit) out = out.subList(0, limit);
+        return out;
+    }
+
+    // One historical Wi-Fi scan snapshot (all BSSIDs seen in the same
+    // scan, sharing the same session_id+ts), tagged with the dead-reckoned
+    // position at that moment -- the unit of a Wi-Fi fingerprint map.
+    private static class Fingerprint {
+        double x, y;
+        java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
+    }
+
+    private List<Fingerprint> allFingerprints() {
+        java.util.LinkedHashMap<String, Fingerprint> byKey = new java.util.LinkedHashMap<>();
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor cur = db.rawQuery(
+                "SELECT session_id, ts, x, y, bssid, rssi FROM radio_scans ORDER BY session_id, ts", null)) {
+            while (cur.moveToNext()) {
+                String key = cur.getLong(0) + ":" + cur.getLong(1);
+                double x = cur.getDouble(2);
+                double y = cur.getDouble(3);
+                Fingerprint fp = byKey.computeIfAbsent(key, k -> {
+                    Fingerprint f = new Fingerprint();
+                    f.x = x; f.y = y;
+                    return f;
+                });
+                fp.rssiByBssid.put(cur.getString(4), cur.getInt(5));
+            }
+        }
+        return new ArrayList<>(byKey.values());
+    }
+
+    // Count of distinct Wi-Fi scan snapshots recorded so far (one per
+    // fingerprint), so Settings can show how much fingerprint data exists.
+    public int fingerprintCount() {
+        SQLiteDatabase db = getReadableDatabase();
+        return countRows(db, "SELECT COUNT(DISTINCT session_id || ':' || ts) FROM radio_scans");
+    }
+
+    // Estimates a position by k-nearest-neighbor matching a live Wi-Fi
+    // scan's RSSI signature against every recorded fingerprint -- the
+    // standard indoor Wi-Fi-fingerprinting technique (RADAR-style), and
+    // more robust indoors than first estimating each AP's own physical
+    // position (see estimateApPositions above) since it never needs that
+    // intermediate step to be accurate. Distance between two fingerprints
+    // is the RMS RSSI difference over shared BSSIDs, with a fixed penalty
+    // per BSSID present in one scan but not the other; the result is the
+    // inverse-distance-weighted average position of the closest k matches.
+    // Returns null when there's nothing to compare against yet, or the
+    // live scan shares no BSSID with any recorded fingerprint. Result is
+    // {x, y, avgMatchDistance} -- the third value is how far (in RSSI-space)
+    // the k nearest matches were, so a caller fusing this into a Kalman
+    // filter can size the measurement's uncertainty by it (see
+    // MappingCollector.applyFingerprintCorrection()).
+    public double[] estimateLocationFromFingerprint(java.util.Map<String, Integer> liveRssi, int k) {
+        if (liveRssi == null || liveRssi.isEmpty()) return null;
+        List<Fingerprint> all = allFingerprints();
+        if (all.isEmpty()) return null;
+
+        List<double[]> scored = new ArrayList<>(); // {distance, x, y}
+        for (Fingerprint fp : all) {
+            double sumSq = 0;
+            int shared = 0;
+            for (java.util.Map.Entry<String, Integer> e : liveRssi.entrySet()) {
+                Integer other = fp.rssiByBssid.get(e.getKey());
+                if (other != null) {
+                    double diff = e.getValue() - other;
+                    sumSq += diff * diff;
+                    shared++;
+                } else {
+                    sumSq += 400; // ~20dB mismatch penalty for a BSSID missing here
+                }
+            }
+            if (shared == 0) continue; // no overlap at all -- not comparable
+            scored.add(new double[]{Math.sqrt(sumSq / liveRssi.size()), fp.x, fp.y});
+        }
+        if (scored.isEmpty()) return null;
+
+        scored.sort((a, b) -> Double.compare(a[0], b[0]));
+        int n = Math.min(k, scored.size());
+        double wSum = 0, wx = 0, wy = 0, distSum = 0;
+        for (int i = 0; i < n; i++) {
+            double[] s = scored.get(i);
+            double w = 1.0 / (s[0] + 1.0); // +1 avoids div-by-zero on an exact match
+            wSum += w;
+            wx += w * s[1];
+            wy += w * s[2];
+            distSum += s[0];
+        }
+        return new double[]{wx / wSum, wy / wSum, distSum / n};
+    }
+
+    // Chronological (x, y) trail from the most recent motion samples, for
+    // the Settings 3D path drawing. Small on-demand read, same reasoning
+    // as estimateApPositions() above.
+    public List<double[]> recentPath(int limit) {
+        List<double[]> out = new ArrayList<>();
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor cur = db.rawQuery(
+                "SELECT x, y FROM motion_samples ORDER BY id DESC LIMIT ?",
+                new String[]{String.valueOf(limit)})) {
+            while (cur.moveToNext()) {
+                out.add(new double[]{cur.getDouble(0), cur.getDouble(1)});
+            }
+        }
+        java.util.Collections.reverse(out);
+        return out;
     }
 
     public List<String> recentWaypoints(long sessionId, int limit) {

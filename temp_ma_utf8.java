@@ -1,4 +1,4 @@
-package dev.rocky.comcitime;
+﻿package dev.rocky.comcitime;
 
 import android.Manifest;
 import android.app.Activity;
@@ -185,34 +185,26 @@ public class MainActivity extends Activity {
         pendingMappingStart = null;
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        nowPanelHandler.removeCallbacksAndMessages(null);
-        mappingTickHandler.removeCallbacksAndMessages(null);
-    }
-
     private LinearLayout buildBottomNav() {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.HORIZONTAL);
         wrap.setBackgroundColor(UiKit.SURFACE);
-        wrap.setPadding(dp(16), dp(12), dp(16), dp(12));
-        wrap.setElevation(dp(8));
+        wrap.setPadding(dp(8), dp(10), dp(8), dp(10));
 
         tabButtons = new Button[TAB_NAMES.length];
         for (int i = 0; i < TAB_NAMES.length; i++) {
             Button b = new Button(this);
-            b.setText(TAB_ICONS[i] + "\n" + TAB_NAMES[i]);
-            b.setTextSize(11);
+            b.setText(TAB_ICONS[i] + "  " + TAB_NAMES[i]);
+            b.setTextSize(13);
             b.setAllCaps(false);
             b.setElevation(0);
             b.setStateListAnimator(null);
             b.setBackground(null);
             b.setPadding(dp(4), dp(8), dp(4), dp(8));
-            b.setLineSpacing(0, 0.8f);
             final int idx = i;
             b.setOnClickListener(v -> { UiKit.popIn(v); showPage(idx); });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            lp.setMargins(dp(3), 0, dp(3), 0);
             wrap.addView(b, lp);
             tabButtons[i] = b;
         }
@@ -221,8 +213,8 @@ public class MainActivity extends Activity {
 
     private GradientDrawable activeTabBg() {
         GradientDrawable d = new GradientDrawable();
-        d.setColor(blend(UiKit.ACCENT, UiKit.SURFACE, 0.24f));
-        d.setCornerRadius(dp(16));
+        d.setColor(blend(UiKit.ACCENT, UiKit.SURFACE, 0.16f));
+        d.setCornerRadius(dp(999));
         return d;
     }
 
@@ -243,38 +235,6 @@ public class MainActivity extends Activity {
             refreshMappingStatus();
             if (accMapping != null && accMapping.getVisibility() == View.VISIBLE) startMappingTick();
         }
-    }
-
-    // Keeps the live sensor readout / 3D gizmo / raw-data graphs updating
-    // at MAPPING_TICK_MS, but only while the mapping accordion section is
-    // actually visible -- torn down on every tab switch or accordion
-    // toggle above so it's never ticking in the background for no reason.
-    // The DB-backed bits (status/counts/path drawing) only need a fraction
-    // of that rate: querying SQLite on the main thread every ~300ms would
-    // risk visible jank, so those refresh every MAPPING_SLOW_TICKS ticks
-    // instead, while everything else here reads straight off the live
-    // MappingCollector's in-memory fields.
-    private static final long MAPPING_TICK_MS = 300;
-    private static final int MAPPING_SLOW_TICKS = 7; // ~every 2.1s
-
-    private void startMappingTick() {
-        if (mappingTick == null) {
-            mappingTick = new Runnable() {
-                int tickCount = 0;
-                @Override
-                public void run() {
-                    if (tickCount % MAPPING_SLOW_TICKS == 0) {
-                        refreshMappingStatus();
-                    } else {
-                        updateMappingLiveViews();
-                    }
-                    tickCount++;
-                    mappingTickHandler.postDelayed(this, MAPPING_TICK_MS);
-                }
-            };
-        }
-        mappingTickHandler.removeCallbacks(mappingTick);
-        mappingTickHandler.post(mappingTick);
     }
 
     private FrameLayout buildOnboardingOverlay() {
@@ -313,7 +273,7 @@ public class MainActivity extends Activity {
         permCard.addView(onboardingLine("정확한 알람", "설정하신 시각에 알림이 오차 없이 정확히 오도록 사용해요."));
         permCard.addView(onboardingLine("기기 재시작 시 실행", "기기를 껐다 켜도 예약해둔 알림이 계속 동작하도록 사용해요."));
         permCard.addView(onboardingLine("포그라운드 서비스 (Live Notify)", "설정에서 Live Notify를 켜면, 지금 몇 교시인지 상단바에 계속 표시하기 위해 사용해요. 끄면 사용하지 않아요."));
-        permCard.addView(onboardingLine("위치/동작 (실내 지도 제작, 실험 기능)", "설정의 \"실내 지도 만들기\"를 직접 시작했을 때만, 학교 실내 위치 지도를 만들기 위해 Wi-Fi 신호 세기와 걸음/방향 정보를 수집해요. 이 정보는 특정 인물과 연결되지 않는 익명 데이터이고, 서버로 보내지 않고 이 기기에만 저장돼요."));
+        permCard.addView(onboardingLine("위치/동작 (실내 지도 제작, 실험 기능)", "학교 실내 위치 지도를 만들기 위해, 걸음/방향 정보와 Wi-Fi 신호 세기를 백그라운드에서 항상 자동으로 수집해요 (켜고 끄는 기능이 아니에요). 이 정보는 특정 인물과 연결되지 않는 익명 데이터이고, 서버로 보내지 않고 이 기기에만 저장돼요. 동의하지 않으면 앱을 사용할 수 없어요."));
         root.addView(permCard, cardLp());
 
         CheckBox agree = new CheckBox(this);
@@ -339,6 +299,7 @@ public class MainActivity extends Activity {
             prefs.setMappingConsentDone(true);
             onboardingOverlay.setVisibility(View.GONE);
             requestNotifPermissionIfNeeded();
+            requestMappingPermissionsIfNeeded(this::startMappingServiceIfPermitted);
         });
 
         scroll.addView(root);
@@ -373,7 +334,7 @@ public class MainActivity extends Activity {
         LinearLayout headerRow = new LinearLayout(this);
         headerRow.setOrientation(LinearLayout.HORIZONTAL);
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
-        headerRow.setPadding(dp(24), dp(24), dp(24), dp(8));
+        headerRow.setPadding(dp(20), dp(20), dp(20), dp(4));
 
         LinearLayout headerClickable = new LinearLayout(this);
         headerClickable.setOrientation(LinearLayout.VERTICAL);
@@ -383,38 +344,36 @@ public class MainActivity extends Activity {
         headerClickable.setOnClickListener(v -> showPage(2));
         classHeaderLabel = new TextView(this);
         classHeaderLabel.setTextColor(UiKit.TEXT_PRIMARY);
-        classHeaderLabel.setTextSize(24);
-        classHeaderLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        classHeaderLabel.setTextSize(20);
+        classHeaderLabel.setTypeface(Typeface.DEFAULT_BOLD);
         classHeaderLabel.setText("학급을 설정해주세요 \u203a");
         headerClickable.addView(classHeaderLabel);
         teacherModeIndicator = new TextView(this);
         teacherModeIndicator.setTextColor(UiKit.ACCENT);
-        teacherModeIndicator.setTextSize(13);
-        teacherModeIndicator.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        teacherModeIndicator.setTextSize(12);
         teacherModeIndicator.setVisibility(View.GONE);
         headerClickable.addView(teacherModeIndicator);
         headerRow.addView(headerClickable, weightedWrap());
 
         Button historyBtn = new Button(this);
         historyBtn.setText("\u23f2 기록");
-        historyBtn.setTextSize(12);
+        historyBtn.setTextSize(11);
         UiKit.styleSecondaryButton(historyBtn);
-        historyBtn.setPadding(dp(16), dp(8), dp(16), dp(8));
         historyBtn.setOnClickListener(v -> showHistoryDialog());
         headerRow.addView(historyBtn);
         root.addView(headerRow);
 
         TextView hint = new TextView(this);
-        hint.setText("길게 눌러 선생님 시간표 보기 (위로 밀면 고정) · 좌우로 밀면 옆 반");
+        hint.setText("길게 눌러 선생님 시간표 보기 (위로 밀면 고정) · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
         hint.setTextColor(UiKit.TEXT_SECONDARY);
-        hint.setTextSize(12);
-        hint.setPadding(dp(24), 0, dp(24), dp(12));
+        hint.setTextSize(11);
+        hint.setPadding(dp(20), 0, dp(20), dp(10));
         root.addView(hint);
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout scrollContent = new LinearLayout(this);
         scrollContent.setOrientation(LinearLayout.VERTICAL);
-        scrollContent.setPadding(dp(16), 0, dp(16), dp(24));
+        scrollContent.setPadding(dp(20), 0, dp(20), dp(24));
 
         nowPanel = new LinearLayout(this);
         nowPanel.setOrientation(LinearLayout.VERTICAL);
@@ -448,7 +407,17 @@ public class MainActivity extends Activity {
 
     private void renderNowPanel() {
         if (nowPanel == null) return;
-        if (prefs.schoolCode().isEmpty() || weekSections.isEmpty() || viewingTeacherName != null) {
+        // INVISIBLE (not GONE) specifically for teacher-view mode: GONE
+        // collapses the panel's height, which reflows everything below it
+        // -- including the week grid the user may still be mid-gesture on
+        // -- shifting it under their finger. INVISIBLE keeps the space
+        // reserved so nothing else on the page moves. The other early-outs
+        // below use GONE since they're not part of an interactive gesture.
+        if (viewingTeacherName != null) {
+            nowPanel.setVisibility(View.INVISIBLE);
+            return;
+        }
+        if (prefs.schoolCode().isEmpty() || weekSections.isEmpty()) {
             nowPanel.setVisibility(View.GONE);
             return;
         }
@@ -499,17 +468,17 @@ public class MainActivity extends Activity {
         nowPanel.setVisibility(View.VISIBLE);
         int subjColor = prefs.subjectColor(current.subject);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(prefs.solidTimetableColor() ? UiKit.darken(prefs.solidBaseColor(), 0.55f) : blend(subjColor, UiKit.SURFACE, 0.45f));
-        bg.setCornerRadius(dp(20));
+        bg.setColor(prefs.solidTimetableColor() ? UiKit.darken(prefs.solidBaseColor(), 0.55f) : blend(subjColor, UiKit.SURFACE, 0.35f));
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(2), UiKit.ACCENT);
         nowPanel.setBackground(bg);
-        nowPanel.setPadding(dp(20), dp(18), dp(20), dp(18));
-        nowPanel.setElevation(dp(4));
+        nowPanel.setPadding(dp(16), dp(14), dp(16), dp(14));
 
         TextView live = new TextView(this);
-        live.setText("● 지금 " + current.period + "교시 · " + formatRemaining(remainingMinutes) + " 남음");
+        live.setText("🔴 지금 " + current.period + "교시 · " + formatRemaining(remainingMinutes) + " 남음");
         live.setTextColor(UiKit.ACCENT);
-        live.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        live.setTextSize(13);
+        live.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        live.setTextSize(12);
         nowPanel.addView(live);
 
         TextView subj = new TextView(this);
@@ -967,12 +936,13 @@ public class MainActivity extends Activity {
         LinearLayout cell = new LinearLayout(this);
         cell.setOrientation(LinearLayout.VERTICAL);
         cell.setGravity(Gravity.CENTER);
-        TableRow.LayoutParams lp = new TableRow.LayoutParams(0, dp(68), 1f);
-        lp.setMargins(dp(3), dp(3), dp(3), dp(3));
+        TableRow.LayoutParams lp = new TableRow.LayoutParams(0, dp(64), 1f);
+        lp.setMargins(dp(2), dp(2), dp(2), dp(2));
         cell.setLayoutParams(lp);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(UiKit.SURFACE_ALT);
-        bg.setCornerRadius(dp(12));
+        bg.setCornerRadius(dp(4));
+        bg.setStroke(Math.max(1, dp(1)), UiKit.BORDER);
         cell.setBackground(bg);
         return cell;
     }
@@ -983,17 +953,17 @@ public class MainActivity extends Activity {
             int base = prefs.solidBaseColor();
             bg.setColor(changed ? UiKit.darken(base, 0.6f) : base);
         } else {
-            bg.setColor(blend(prefs.subjectColor(subject), UiKit.SURFACE, 0.55f));
+            bg.setColor(blend(prefs.subjectColor(subject), UiKit.SURFACE, 0.72f));
         }
-        bg.setCornerRadius(dp(12));
+        bg.setCornerRadius(dp(4));
         cell.setBackground(bg);
-        cell.setPadding(dp(4), dp(8), dp(4), dp(8));
+        cell.setPadding(dp(4), dp(5), dp(4), dp(5));
 
         TextView subjectView = new TextView(this);
         subjectView.setText(subject);
         subjectView.setTextColor(Color.WHITE);
-        subjectView.setTextSize(14);
-        subjectView.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        subjectView.setTextSize(13);
+        subjectView.setTypeface(Typeface.DEFAULT_BOLD);
         subjectView.setGravity(Gravity.CENTER);
         subjectView.setMaxLines(2);
         cell.addView(subjectView);
@@ -1379,6 +1349,38 @@ public class MainActivity extends Activity {
         return b;
     }
 
+    // Keeps the live sensor readout / 3D gizmo / raw-data graphs updating
+    // at MAPPING_TICK_MS, but only while the mapping accordion section is
+    // actually visible -- torn down on every tab switch or accordion
+    // toggle above so it's never ticking in the background for no reason.
+    // The DB-backed bits (status/counts/path drawing) only need a fraction
+    // of that rate: querying SQLite on the main thread every ~300ms would
+    // risk visible jank, so those refresh every MAPPING_SLOW_TICKS ticks
+    // instead, while everything else here reads straight off the live
+    // MappingCollector's in-memory fields.
+    private static final long MAPPING_TICK_MS = 300;
+    private static final int MAPPING_SLOW_TICKS = 7; // ~every 2.1s
+
+    private void startMappingTick() {
+        if (mappingTick == null) {
+            mappingTick = new Runnable() {
+                int tickCount = 0;
+                @Override
+                public void run() {
+                    if (tickCount % MAPPING_SLOW_TICKS == 0) {
+                        refreshMappingStatus();
+                    } else {
+                        updateMappingLiveViews();
+                    }
+                    tickCount++;
+                    mappingTickHandler.postDelayed(this, MAPPING_TICK_MS);
+                }
+            };
+        }
+        mappingTickHandler.removeCallbacks(mappingTick);
+        mappingTickHandler.post(mappingTick);
+    }
+
     private LinearLayout buildSchoolSection() {
         LinearLayout section = new LinearLayout(this);
         section.setOrientation(LinearLayout.VERTICAL);
@@ -1707,11 +1709,11 @@ public class MainActivity extends Activity {
         rawLegend.setText("X 빨강 · Y 초록 · Z 파랑");
         UiKit.styleCaption(rawLegend);
         rawCard.addView(rawLegend);
-        accelGraph = new SparklineView(this, "📉 가속도계", " m/s²");
-        gyroGraph = new SparklineView(this, "📉 자이로스코프", " rad/s");
-        magGraph = new SparklineView(this, "📉 자기장 센서", " μT");
-        pressureGraph = new SparklineView(this, "📉 기압계", " hPa");
-        rssiGraph = new SparklineView(this, "📉 Wi-Fi 최강 신호", " dBm");
+        accelGraph = new SparklineView(this, "🚶 가속도계", " m/s²");
+        gyroGraph = new SparklineView(this, "🧭 자이로스코프", " rad/s");
+        magGraph = new SparklineView(this, "🧭 자기장 센서", " μT");
+        pressureGraph = new SparklineView(this, "📏 기압계", " hPa");
+        rssiGraph = new SparklineView(this, "📶 Wi-Fi 최강 신호", " dBm");
         for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph}) {
             LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
             glp.topMargin = dp(6);
@@ -1726,7 +1728,7 @@ public class MainActivity extends Activity {
         UiKit.styleCaption(gyroYawHint);
         gyroYawHint.setPadding(0, dp(2), 0, 0);
         gyroYawCard.addView(gyroYawHint);
-        gyroYawGraph = new SparklineView(this, "📉 자이로 전용 방향", "°");
+        gyroYawGraph = new SparklineView(this, "🧭 자이로 전용 방향", "°");
         LinearLayout.LayoutParams gyroYawLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64));
         gyroYawLp.topMargin = dp(8);
         gyroYawCard.addView(gyroYawGraph, gyroYawLp);
@@ -2225,8 +2227,7 @@ public class MainActivity extends Activity {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
         c.setBackground(UiKit.card());
-        c.setPadding(dp(20), dp(20), dp(20), dp(20));
-        c.setElevation(dp(1));
+        c.setPadding(dp(14), dp(14), dp(14), dp(14));
         return c;
     }
 
