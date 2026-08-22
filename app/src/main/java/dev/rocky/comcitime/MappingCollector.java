@@ -157,6 +157,18 @@ public class MappingCollector {
     // to match it against the fingerprint map for the drift correction
     // described in the class doc.
     private java.util.Map<String, Integer> lastScanRssi = new java.util.HashMap<>();
+    // Frequencies for the same scan, kept alongside lastScanRssi so a
+    // manual place tag (see addPlaceTag()) can persist real frequencies
+    // instead of a placeholder.
+    private java.util.Map<String, Integer> lastScanFreqByBssid = new java.util.HashMap<>();
+
+    // Latest live place-recognition result (MappingDb.recognizePlace()),
+    // refreshed on every Wi-Fi scan alongside the fingerprint-correction
+    // match above -- cheap, since rssiByBssid is already computed for that
+    // in recordScanResults(). volatile is enough since this is a read-only
+    // cached value for the UI tick to poll, unlike applyFingerprintCorrection()
+    // which must run on the main thread because it mutates position state.
+    private volatile MappingDb.PlaceMatch lastPlaceMatch;
 
     // Custom low-latency step detector (accelerometer peak detection),
     // used instead of the platform's TYPE_STEP_DETECTOR -- see class doc.
@@ -470,6 +482,7 @@ public class MappingCollector {
     public float getHeadingDeg() { return headingDeg; }
     public double getLastStepLengthM() { return lastStepLengthM; }
     public java.util.Map<String, Integer> getLastScanRssi() { return lastScanRssi; }
+    public MappingDb.PlaceMatch getLastPlaceMatch() { return lastPlaceMatch; }
     public float getPitchDeg() { return pitchDeg; }
     public float getRollDeg() { return rollDeg; }
     public int getStepCount() { return stepCount; }
@@ -660,6 +673,28 @@ public class MappingCollector {
         dbExecutor.execute(() -> db.insertWaypoint(sid, floor, label, x, y));
     }
 
+    // Sibling to addWaypoint(): snapshots the CURRENT live Wi-Fi scan
+    // (lastScanRssi/lastScanFreqByBssid) under the same floor/label,
+    // building a place->Wi-Fi-fingerprint directory independent of dead-
+    // reckoning drift/accuracy -- a direct manual ground-truth tag, not
+    // inferred from posX/posY. No-ops if no Wi-Fi scan has landed yet;
+    // addWaypoint's position tag still succeeds either way, since the two
+    // are independent persistence paths sharing one user tap. Not session-
+    // scoped (no sessionId gate) -- places are meant to accumulate across
+    // sessions/days, unlike per-session dead-reckoning data.
+    public void addPlaceTag(String floor, String label) {
+        java.util.Map<String, Integer> rssi = new java.util.HashMap<>(lastScanRssi);
+        if (rssi.isEmpty()) return;
+        java.util.Map<String, Integer> freq = new java.util.HashMap<>(lastScanFreqByBssid);
+        long ts = System.currentTimeMillis();
+        dbExecutor.execute(() -> {
+            for (java.util.Map.Entry<String, Integer> e : rssi.entrySet()) {
+                Integer f = freq.get(e.getKey());
+                db.insertPlaceFingerprint(ts, floor, label, e.getKey(), e.getValue(), f != null ? f : 0);
+            }
+        });
+    }
+
     // Synchronous on purpose -- only called from an explicit user tap
     // (not on a hot path), so a brief direct read is fine.
     public MappingDb.Counts counts() {
@@ -684,12 +719,15 @@ public class MappingCollector {
         }
         int top = -120;
         java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
+        java.util.Map<String, Integer> freqByBssid = new java.util.HashMap<>();
         for (ScanResult r : results) {
             if (r.level > top) top = r.level;
             rssiByBssid.put(r.BSSID, r.level);
+            freqByBssid.put(r.BSSID, r.frequency);
         }
         lastTopRssi = top;
         lastScanRssi = rssiByBssid;
+        lastScanFreqByBssid = freqByBssid;
         long sid = sessionId;
         long ts = System.currentTimeMillis();
         double x = posX, y = posY;
@@ -706,6 +744,9 @@ public class MappingCollector {
             if (match != null) {
                 handler.post(() -> applyFingerprintCorrection(match[0], match[1], match[2]));
             }
+            // Piggybacks on the same rssiByBssid -- no extra Wi-Fi scan
+            // needed for place recognition (see addPlaceTag()/class doc).
+            lastPlaceMatch = db.recognizePlace(rssiByBssid, 5);
         });
         if (listener != null) listener.onScanCount(results.size());
     }

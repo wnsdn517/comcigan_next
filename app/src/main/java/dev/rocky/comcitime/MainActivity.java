@@ -1813,6 +1813,7 @@ public class MainActivity extends Activity {
                 return;
             }
             running.addWaypoint(floor, label);
+            running.addPlaceTag(floor, label);
             mappingLabelInput.setText("");
             Toast.makeText(this, "표시했어요: " + floor + " " + label, Toast.LENGTH_SHORT).show();
             refreshMappingStatus();
@@ -1858,8 +1859,9 @@ public class MainActivity extends Activity {
         MappingDb mappingDb = new MappingDb(this);
         MappingDb.Counts c = mappingDb.counts();
         int fingerprints = mappingDb.fingerprintCount();
+        int places = mappingDb.placeCount();
         mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans
-                + "개 · 지문(위치별 스캔) " + fingerprints + "개 · 이름표 " + c.waypoints + "개");
+                + "개 · 지문(위치별 스캔) " + fingerprints + "개 · 이름표 " + c.waypoints + "개 · 장소 " + places + "개");
         updateMappingLiveViews();
         refreshMappingPathView();
     }
@@ -1905,14 +1907,19 @@ public class MainActivity extends Activity {
         double dist = Math.sqrt(x * x + y * y);
         String gps = Double.isNaN(running.getLastLat()) ? "미확보"
                 : String.format(Locale.KOREA, "%.5f, %.5f", running.getLastLat(), running.getLastLon());
+        MappingDb.PlaceMatch placeMatch = running.getLastPlaceMatch();
+        String placeStr = placeMatch == null ? "알 수 없음"
+                : String.format(Locale.KOREA, "%s %s (거리 %.1f)", placeMatch.floor, placeMatch.label, placeMatch.avgMatchDistance);
         mappingSensorText.setText(String.format(Locale.KOREA,
                 "방위(heading) %.0f°  기울기(pitch) %.0f°  좌우기울기(roll) %.0f°\n" +
                         "걸음 수 %d  위치 (%.1f, %.1f) m ±%.1fm  원점에서 %.1fm\n" +
                         "추정 층 변화 %+d층  화면 방향 %d°  GPS %s\n" +
-                        "정지 상태 %s  보행 확정 %s",
+                        "정지 상태 %s  보행 확정 %s\n" +
+                        "Wi-Fi 추정 장소 %s",
                 heading, pitch, roll, steps, x, y, running.getPositionUncertaintyM(), dist,
                 running.getEstimatedFloorDelta(), running.getScreenRotationDeg(), gps,
-                running.isStationary() ? "예" : "아니오", running.isInGaitStreak() ? "예" : "아니오"));
+                running.isStationary() ? "예" : "아니오", running.isInGaitStreak() ? "예" : "아니오",
+                placeStr));
         if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
         if (mappingStrideText != null) {
             mappingStrideText.setText(String.format(Locale.KOREA,
