@@ -30,9 +30,14 @@ import android.widget.TableRow;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileWriter;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
@@ -1836,7 +1841,46 @@ public class MainActivity extends Activity {
         apEstimatesBtn.setOnClickListener(v -> showApEstimatesDialog());
         section.addView(apEstimatesBtn, apBtnLp);
 
+        Button exportBtn = new Button(this);
+        exportBtn.setText("전체 매핑 데이터 내보내기 (파일로 저장)");
+        exportBtn.setTextSize(11);
+        UiKit.styleSecondaryButton(exportBtn);
+        LinearLayout.LayoutParams exportBtnLp = matchWrap();
+        exportBtnLp.topMargin = dp(8);
+        exportBtn.setOnClickListener(v -> exportMappingData());
+        section.addView(exportBtn, exportBtnLp);
+
         return section;
+    }
+
+    // Dumps every mapping table (sessions/radio_scans/motion_samples/
+    // waypoints/place_fingerprints) to one JSON file under app-specific
+    // external storage -- no share sheet, no runtime storage permission
+    // needed on any supported API level, just a file the user can pull off
+    // the device with a file manager or adb. Runs off the main thread since
+    // the scan/motion tables can get large; this is an on-demand tap, not a
+    // hot path, so a plain Thread (not a shared executor) is enough.
+    private void exportMappingData() {
+        Toast.makeText(this, "내보내는 중...", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                MappingDb db = new MappingDb(this);
+                JSONObject data = db.exportAllData();
+                File dir = getExternalFilesDir("exports");
+                if (dir == null) dir = new File(getFilesDir(), "exports");
+                if (!dir.exists()) dir.mkdirs();
+                String name = "mapping_export_" +
+                        new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.KOREA).format(new Date()) + ".json";
+                File file = new File(dir, name);
+                try (FileWriter w = new FileWriter(file)) {
+                    w.write(data.toString(2));
+                }
+                String path = file.getAbsolutePath();
+                runOnUiThread(() -> Toast.makeText(this, "저장됨: " + path, Toast.LENGTH_LONG).show());
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(this, "내보내기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
+            }
+        }).start();
     }
 
     private void refreshMappingStatus() {

@@ -6,12 +6,18 @@ import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.util.ArrayList;
 import java.util.List;
 
 // Local-only storage for the experimental indoor-mapping data collection
-// feature (Settings -> 실내 지도 만들기). Nothing here leaves the device --
-// there is no upload/server in this build. Rows are keyed by an
+// feature (Settings -> 실내 지도 만들기). Nothing leaves the device on its
+// own -- there is no upload/server in this build -- but exportAllData()
+// lets the user pull everything out as a file (see MainActivity's
+// "내보내기" button). Rows are keyed by an
 // auto-increment session id, never by user identity or account, so this
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
@@ -416,6 +422,42 @@ public class MappingDb extends SQLiteOpenHelper {
                 out.add(cur.getString(0) + " · " + cur.getString(1));
             }
         }
+        return out;
+    }
+
+    // Dumps every row of one table as a JSONArray of {column: value}
+    // objects -- shared by exportAllData() below. `table` is always one of
+    // the hardcoded literals passed by exportAllData(), never external
+    // input, so concatenating it into the query has no injection surface.
+    // getString(i) stringifies every column uniformly (ints/reals/text
+    // alike), which is fine for a debug/export dump.
+    private JSONArray dumpTable(SQLiteDatabase db, String table) throws JSONException {
+        JSONArray arr = new JSONArray();
+        try (Cursor cur = db.rawQuery("SELECT * FROM " + table, null)) {
+            while (cur.moveToNext()) {
+                JSONObject row = new JSONObject();
+                for (int i = 0; i < cur.getColumnCount(); i++) {
+                    row.put(cur.getColumnName(i), cur.isNull(i) ? JSONObject.NULL : cur.getString(i));
+                }
+                arr.put(row);
+            }
+        }
+        return arr;
+    }
+
+    // Everything this feature has collected, as one JSON document -- lets
+    // the user pull the whole local dataset off the device as a file (see
+    // MainActivity's "내보내기" button), since nothing here is uploaded on
+    // its own (see class doc).
+    public JSONObject exportAllData() throws JSONException {
+        SQLiteDatabase db = getReadableDatabase();
+        JSONObject out = new JSONObject();
+        out.put("exported_at", System.currentTimeMillis());
+        out.put("sessions", dumpTable(db, "sessions"));
+        out.put("radio_scans", dumpTable(db, "radio_scans"));
+        out.put("motion_samples", dumpTable(db, "motion_samples"));
+        out.put("waypoints", dumpTable(db, "waypoints"));
+        out.put("place_fingerprints", dumpTable(db, "place_fingerprints"));
         return out;
     }
 }
