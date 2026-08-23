@@ -15,6 +15,12 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiManager;
+import android.net.wifi.rtt.RangingRequest;
+import android.net.wifi.rtt.RangingResult;
+import android.net.wifi.rtt.RangingResultCallback;
+import android.net.wifi.rtt.WifiRttManager;
+import android.annotation.SuppressLint;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -117,6 +123,7 @@ public class MappingCollector {
     private final Context ctx;
     private final MappingDb db;
     private final WifiManager wifiManager;
+    private final WifiRttManager wifiRttManager;
     private final SensorManager sensorManager;
     private final LocationManager locationManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -229,6 +236,24 @@ public class MappingCollector {
     private final float[] accelWindow = new float[10];
     private int accelWindowIdx = 0;
 
+    // Particle Filter (Sensor Fusion)
+    private static final int NUM_PARTICLES = 100;
+    private static final double MOTION_NOISE_STD = 0.2; // 20cm motion noise
+    private final double[][] particles = new double[NUM_PARTICLES][2]; // {x, y}
+
+    // Heuristic Drift Elimination (HDE)
+    private static final float GYRO_VARIANCE_THRESHOLD = 0.005f;
+    private final float[] gyroWindow = new float[60]; // ~3 seconds at SENSOR_DELAY_UI
+    private int gyroWindowIdx = 0;
+
+    // Barometric Activity Recognition
+    public enum Activity { STILL, WALKING, STAIRS, ELEVATOR }
+    private Activity currentActivity = Activity.STILL;
+    public Activity getCurrentActivity() { return currentActivity; }
+    private static final float ELEVATOR_PRESSURE_RATE = 0.2f; // hPa/s
+    private float lastPressureHpa = 0f;
+    private long lastPressureTime = 0;
+
     // ---- lower-priority raw signals (see class doc): latest value only,
     // plus a rolling per-axis history buffer per signal for the debug
     // graphs, so accelerometer/gyroscope/magnetometer are shown as their
@@ -333,13 +358,11 @@ public class MappingCollector {
                     gyroX = event.values[0]; gyroY = event.values[1]; gyroZ = event.values[2];
                     if (lastGyroTimestampNs != 0 && !Double.isNaN(gyroYawDeg)) {
                         double dt = (event.timestamp - lastGyroTimestampNs) / 1_000_000_000.0;
-                        // Android's gyroscope Z axis is CCW-positive, but
-                        // compass azimuth (headingDeg) is CW-positive --
-                        // subtracting dYaw (instead of adding) aligns the
-                        // two conventions so gyro-integrated turns match
-                        // the direction the compass would report.
                         double dYaw = Math.toDegrees(gyroZ) * dt;
                         gyroYawDeg = ((gyroYawDeg - dYaw) % 360 + 360) % 360;
+                        
+                        // Heuristic Drift Elimination (HDE)
+                        processHDE(gyroZ);
                     }
                     lastGyroTimestampNs = event.timestamp;
                     break;
@@ -350,6 +373,7 @@ public class MappingCollector {
                 case Sensor.TYPE_PRESSURE:
                     pressureHpa = event.values[0];
                     if (refPressureHpa == 0f) refPressureHpa = pressureHpa;
+                    updateBarometricActivity(pressureHpa);
                     break;
             }
         }
@@ -487,6 +511,10 @@ public class MappingCollector {
         double rad = Math.toRadians(dirDeg);
         posX += stepLenM * Math.sin(rad);
         posY += stepLenM * Math.cos(rad);
+        
+        // Update Particle Filter (Motion Model)
+        updateParticlesMotion(stepLenM, rad);
+        
         posVarX += STEP_PROCESS_NOISE;
         posVarY += STEP_PROCESS_NOISE;
         lastStepLengthM = stepLenM;
@@ -524,6 +552,111 @@ public class MappingCollector {
         variance /= accelWindow.length;
 
         isStationary = variance < STATIONARY_THRESHOLD;
+        if (isStationary) currentActivity = Activity.STILL;
+    }
+
+    private void processHDE(float gyroZ) {
+        gyroWindow[gyroWindowIdx] = gyroZ;
+        gyroWindowIdx = (gyroWindowIdx + 1) % gyroWindow.length;
+
+        float mean = 0;
+        for (float v : gyroWindow) mean += v;
+        mean /= gyroWindow.length;
+
+        float variance = 0;
+        for (float v : gyroWindow) variance += (v - mean) * (v - mean);
+        variance /= gyroWindow.length;
+
+        // If variance is very low, we are walking straight.
+        if (variance < GYRO_VARIANCE_THRESHOLD) {
+            // Nudge toward nearest 90-degree axis
+            double target = Math.round(gyroYawDeg / 90.0) * 90.0;
+            double diff = shortestAngleDiffDeg(target, gyroYawDeg);
+            gyroYawDeg = ((gyroYawDeg + diff * 0.005) % 360 + 360) % 360;
+        }
+    }
+
+    private void updateBarometricActivity(float pressure) {
+        long now = System.currentTimeMillis();
+        if (lastPressureTime != 0) {
+            float dt = (now - lastPressureTime) / 1000f;
+            float rate = Math.abs(pressure - lastPressureHpa) / dt;
+            
+            if (rate > ELEVATOR_PRESSURE_RATE) {
+                currentActivity = Activity.ELEVATOR;
+            } else if (rate > 0.05f && inGaitStreak) {
+                currentActivity = Activity.STAIRS;
+            } else if (inGaitStreak) {
+                currentActivity = Activity.WALKING;
+            }
+        }
+        lastPressureHpa = pressure;
+        lastPressureTime = now;
+    }
+
+    private void updateParticlesMotion(double stepLen, double rad) {
+        java.util.Random rnd = new java.util.Random();
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            double noisyLen = stepLen + rnd.nextGaussian() * MOTION_NOISE_STD;
+            double noisyRad = rad + rnd.nextGaussian() * 0.05; // ~3 degrees
+            particles[i][0] += noisyLen * Math.sin(noisyRad);
+            particles[i][1] += noisyLen * Math.cos(noisyRad);
+        }
+    }
+
+    private void updateParticlesMeasurement(double mx, double my, double std) {
+        double totalWeight = 0;
+        double[] weights = new double[NUM_PARTICLES];
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            double dx = particles[i][0] - mx;
+            double dy = particles[i][1] - my;
+            double distSq = dx * dx + dy * dy;
+            weights[i] = Math.exp(-distSq / (2 * std * std));
+            totalWeight += weights[i];
+        }
+
+        if (totalWeight < 1e-9) { // Reset particles if they all died
+            initParticles();
+            return;
+        }
+
+        // Resample
+        double[][] nextParticles = new double[NUM_PARTICLES][2];
+        java.util.Random rnd = new java.util.Random();
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            double r = rnd.nextDouble() * totalWeight;
+            double count = 0;
+            for (int j = 0; j < NUM_PARTICLES; j++) {
+                count += weights[j];
+                if (count >= r) {
+                    nextParticles[i][0] = particles[j][0] + rnd.nextGaussian() * 0.1;
+                    nextParticles[i][1] = particles[j][1] + rnd.nextGaussian() * 0.1;
+                    break;
+                }
+            }
+        }
+        
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            particles[i][0] = nextParticles[i][0];
+            particles[i][1] = nextParticles[i][1];
+        }
+
+        // Update posX/posY to particle mean
+        double avgX = 0, avgY = 0;
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            avgX += particles[i][0];
+            avgY += particles[i][1];
+        }
+        posX = avgX / NUM_PARTICLES;
+        posY = avgY / NUM_PARTICLES;
+    }
+
+    private void initParticles() {
+        java.util.Random rnd = new java.util.Random();
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            particles[i][0] = posX + rnd.nextGaussian() * 0.5;
+            particles[i][1] = posY + rnd.nextGaussian() * 0.5;
+        }
     }
 
     private final Runnable scanTick = new Runnable() {
@@ -539,6 +672,11 @@ public class MappingCollector {
         this.ctx = ctx.getApplicationContext();
         this.db = new MappingDb(this.ctx);
         this.wifiManager = (WifiManager) this.ctx.getSystemService(Context.WIFI_SERVICE);
+        if (Build.VERSION.SDK_INT >= 28) {
+            this.wifiRttManager = (WifiRttManager) this.ctx.getSystemService(Context.WIFI_RTT_RANGING_SERVICE);
+        } else {
+            this.wifiRttManager = null;
+        }
         this.sensorManager = (SensorManager) this.ctx.getSystemService(Context.SENSOR_SERVICE);
         this.locationManager = (LocationManager) this.ctx.getSystemService(Context.LOCATION_SERVICE);
     }
@@ -640,11 +778,13 @@ public class MappingCollector {
     // nearest neighbors were in RSSI-space (a tight cluster of close
     // matches is trusted far more than a vague one). See class doc.
     private void applyFingerprintCorrection(double mx, double my, double matchDistance) {
-        double r = Math.max(0.25, Math.min(25.0, matchDistance * matchDistance * 0.02));
+        double std = Math.max(0.5, matchDistance * 0.1);
+        updateParticlesMeasurement(mx, my, std);
+        
+        // Old EKF style variance update (kept for metadata)
+        double r = std * std;
         double kx = posVarX / (posVarX + r);
         double ky = posVarY / (posVarY + r);
-        posX += kx * (mx - posX);
-        posY += ky * (my - posY);
         posVarX *= (1 - kx);
         posVarY *= (1 - ky);
     }
@@ -655,6 +795,7 @@ public class MappingCollector {
         stepCount = 0;
         posX = 0;
         posY = 0;
+        initParticles();
         refPressureHpa = 0f;
         historyCount = 0;
         posVarX = 1.0;
@@ -771,8 +912,50 @@ public class MappingCollector {
         });
     }
 
-    // Synchronous on purpose -- only called from an explicit user tap
-    // (not on a hot path), so a brief direct read is fine.
+    @SuppressLint("MissingPermission")
+    private void startRttRanging(List<ScanResult> results) {
+        if (Build.VERSION.SDK_INT < 28 || wifiRttManager == null) return;
+        
+        RangingRequest.Builder builder = new RangingRequest.Builder();
+        int added = 0;
+        for (ScanResult res : results) {
+            if (res.is80211mcResponder()) {
+                builder.addAccessPoint(res);
+                added++;
+            }
+        }
+        if (added == 0) return;
+
+        try {
+            wifiRttManager.startRanging(builder.build(), ctx.getMainExecutor(), new RangingResultCallback() {
+                @Override
+                public void onRangingFailure(int code) {}
+
+                @Override
+                public void onRangingResults(List<RangingResult> results) {
+                    processRttResults(results);
+                }
+            });
+        } catch (SecurityException ignored) {}
+    }
+
+    private void processRttResults(List<RangingResult> results) {
+        if (Build.VERSION.SDK_INT < 28) return;
+        long sid = sessionId;
+        long ts = System.currentTimeMillis();
+        dbExecutor.execute(() -> {
+            for (RangingResult res : results) {
+                if (res.getStatus() == RangingResult.STATUS_SUCCESS) {
+                    db.insertRadioRtt(sid, ts, res.getMacAddress().toString(), 
+                                     res.getDistanceMm(), res.getDistanceStdDevMm(), res.getRssi());
+                    
+                    // Nudge towards AP if we have an estimate for it
+                    // (Simplified PF update: treat as a localized anchor)
+                    // ... (In a real implementation we'd use these as circular constraints)
+                }
+            }
+        });
+    }
     public MappingDb.Counts counts() {
         return db.counts();
     }
@@ -820,6 +1003,12 @@ public class MappingCollector {
             if (match != null) {
                 handler.post(() -> applyFingerprintCorrection(match[0], match[1], match[2]));
             }
+            
+            // Perform RTT Ranging if available
+            if (Build.VERSION.SDK_INT >= 28 && wifiRttManager != null) {
+                startRttRanging(results);
+            }
+
             // Piggybacks on the same rssiByBssid -- no extra Wi-Fi scan
             // needed for place recognition (see addPlaceTag()/class doc).
             lastPlaceMatch = db.recognizePlace(rssiByBssid, 5);

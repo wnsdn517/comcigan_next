@@ -1,9 +1,12 @@
 package dev.rocky.comcitime;
 
 import android.content.Context;
+import android.graphics.RenderEffect;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.os.Build;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -17,29 +20,38 @@ import android.widget.TextView;
 // blended glow, flat blocks instead of shadows, snappier ease-out motion
 // instead of springy overshoot -- rather than a glossy "modern SaaS" look.
 public class UiKit {
-    public static final int BG = 0xFF14161D;
-    public static final int SURFACE = 0xFF1E212B;
-    public static final int SURFACE_ALT = 0xFF262A36;
-    public static final int BORDER = 0xFF3A4052;
-    public static final int TEXT_PRIMARY = 0xFFEDEEF3;
-    public static final int TEXT_SECONDARY = 0xFF8B90A0;
-    public static final int ACCENT = 0xFFF2B94C;
-    public static final int ACCENT_TEXT = 0xFF14161D;
-    public static final int CHANGED = 0xFFFF6B5E;
+    // Liquid Glass Palette v2
+    public static final int BG = 0xFF08090C; 
+    public static final int SURFACE = 0x1AFFFFFF; // 10% white
+    public static final int SURFACE_ALT = 0x26FFFFFF; // 15% white
+    public static final int BORDER = 0x33FFFFFF; // 20% white
+    public static final int TEXT_PRIMARY = 0xFFF5F5F7; 
+    public static final int TEXT_SECONDARY = 0xFF9DA3AE;
+    public static final int ACCENT = 0xFF8EACFF; 
+    public static final int ACCENT_TEXT = 0xFF08090C;
+    public static final int CHANGED = 0x4DFF6B5E;
 
     public static GradientDrawable card() {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE);
-        d.setCornerRadius(dp(8));
-        d.setStroke(dp2(), BORDER);
+        d.setCornerRadius(dp(24));
+        d.setStroke(dp(1), BORDER);
+        return d;
+    }
+
+    public static GradientDrawable glassPanel(int cornerRadiusDp) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(SURFACE);
+        d.setCornerRadius(dp(cornerRadiusDp));
+        d.setStroke(dp(1), BORDER);
         return d;
     }
 
     public static GradientDrawable inputBg() {
         GradientDrawable d = new GradientDrawable();
-        d.setColor(SURFACE_ALT);
-        d.setCornerRadius(dp(6));
-        d.setStroke(dp2(), BORDER);
+        d.setColor(0x11FFFFFF);
+        d.setCornerRadius(dp(16));
+        d.setStroke(dp(1), 0x22FFFFFF);
         return d;
     }
 
@@ -61,12 +73,10 @@ public class UiKit {
     public static StateListDrawable primaryButtonBg() {
         GradientDrawable normal = new GradientDrawable();
         normal.setColor(ACCENT);
-        normal.setCornerRadius(dp(6));
-        normal.setStroke(dp2(), darken(ACCENT, 0.7f));
+        normal.setCornerRadius(dp(999));
         GradientDrawable pressed = new GradientDrawable();
-        pressed.setColor(darken(ACCENT, 0.85f));
-        pressed.setCornerRadius(dp(6));
-        pressed.setStroke(dp2(), darken(ACCENT, 0.7f));
+        pressed.setColor(darken(ACCENT, 0.8f));
+        pressed.setCornerRadius(dp(999));
         StateListDrawable sld = new StateListDrawable();
         sld.addState(new int[]{android.R.attr.state_pressed}, pressed);
         sld.addState(new int[]{}, normal);
@@ -75,13 +85,13 @@ public class UiKit {
 
     public static StateListDrawable secondaryButtonBg() {
         GradientDrawable normal = new GradientDrawable();
-        normal.setColor(SURFACE_ALT);
-        normal.setStroke(dp2(), BORDER);
-        normal.setCornerRadius(dp(6));
+        normal.setColor(0x11FFFFFF);
+        normal.setCornerRadius(dp(999));
+        normal.setStroke(dp(1), 0x22FFFFFF);
         GradientDrawable pressed = new GradientDrawable();
-        pressed.setColor(darken(SURFACE_ALT, 0.8f));
-        pressed.setStroke(dp2(), BORDER);
-        pressed.setCornerRadius(dp(6));
+        pressed.setColor(0x22FFFFFF);
+        pressed.setCornerRadius(dp(999));
+        pressed.setStroke(dp(1), 0x44FFFFFF);
         StateListDrawable sld = new StateListDrawable();
         sld.addState(new int[]{android.R.attr.state_pressed}, pressed);
         sld.addState(new int[]{}, normal);
@@ -91,9 +101,9 @@ public class UiKit {
     public static void stylePrimaryButton(Button b) {
         b.setBackground(primaryButtonBg());
         b.setTextColor(ACCENT_TEXT);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         b.setAllCaps(false);
-        b.setPadding(dp(16), dp(12), dp(16), dp(12));
+        b.setPadding(dp(24), dp(14), dp(24), dp(14));
         b.setElevation(0);
         b.setStateListAnimator(null);
     }
@@ -101,8 +111,9 @@ public class UiKit {
     public static void styleSecondaryButton(Button b) {
         b.setBackground(secondaryButtonBg());
         b.setTextColor(TEXT_PRIMARY);
+        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         b.setAllCaps(false);
-        b.setPadding(dp(16), dp(12), dp(16), dp(12));
+        b.setPadding(dp(24), dp(14), dp(24), dp(14));
         b.setElevation(0);
         b.setStateListAnimator(null);
     }
@@ -111,24 +122,29 @@ public class UiKit {
         e.setBackground(inputBg());
         e.setTextColor(TEXT_PRIMARY);
         e.setHintTextColor(TEXT_SECONDARY);
-        e.setPadding(dp(12), dp(10), dp(12), dp(10));
+        e.setPadding(dp(16), dp(14), dp(16), dp(14));
+        e.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
     }
 
     public static void styleEyebrow(TextView t) {
         t.setTextColor(ACCENT);
-        t.setTextSize(12);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setLetterSpacing(0.06f);
+        t.setTextSize(13);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setLetterSpacing(0.08f);
+        t.setAllCaps(true);
     }
 
     public static void styleBody(TextView t) {
         t.setTextColor(TEXT_PRIMARY);
-        t.setTextSize(15);
+        t.setTextSize(16);
+        t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        t.setLineSpacing(0, 1.2f);
     }
 
     public static void styleCaption(TextView t) {
         t.setTextColor(TEXT_SECONDARY);
-        t.setTextSize(12);
+        t.setTextSize(13);
+        t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
     }
 
     public static int darken(int color, float factor) {
@@ -207,28 +223,56 @@ public class UiKit {
         });
     }
 
+    // Snappy spring-like interpolator for physics-based feel
+    public static class SpringInterpolator implements android.view.animation.Interpolator {
+        private double factor = 0.4;
+        public SpringInterpolator(double factor) { this.factor = factor; }
+        @Override
+        public float getInterpolation(float input) {
+            return (float) (Math.pow(2, -10 * input) * Math.sin((input - factor / 4) * (2 * Math.PI) / factor) + 1);
+        }
+    }
+
     public static void popIn(View v) {
         v.setAlpha(0f);
-        v.animate().alpha(1f).setDuration(140)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+        v.setScaleX(0.92f);
+        v.setScaleY(0.92f);
+        v.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(400)
+                .setInterpolator(new SpringInterpolator(0.4)).start();
+    }
+
+    public static void telegramBouncy(View v) {
+        v.setScaleX(0.7f);
+        v.setScaleY(0.7f);
+        v.setAlpha(0f);
+        v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(500)
+                .setInterpolator(new SpringInterpolator(0.45)).start();
     }
 
     public static void crossFade(View outView, View inView, Runnable onSwapped) {
-        outView.animate().alpha(0f).setDuration(100)
+        outView.animate().alpha(0f).scaleX(0.95f).scaleY(0.95f).setDuration(200)
                 .setInterpolator(new android.view.animation.AccelerateInterpolator())
                 .withEndAction(() -> {
                     onSwapped.run();
                     inView.setAlpha(0f);
-                    inView.animate().alpha(1f).setDuration(140)
-                            .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+                    inView.setScaleX(1.05f);
+                    inView.setScaleY(1.05f);
+                    inView.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(300)
+                            .setInterpolator(new SpringInterpolator(0.5)).start();
                 }).start();
     }
 
     public static void slideAndFadeIn(View v, float fromDx) {
         v.setTranslationX(fromDx);
         v.setAlpha(0f);
-        v.animate().translationX(0f).alpha(1f).setDuration(160)
-                .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+        v.animate().translationX(0f).alpha(1f).setDuration(450)
+                .setInterpolator(new SpringInterpolator(0.6)).start();
+    }
+
+    public static void applyLiquidGlass(View v) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            v.setRenderEffect(RenderEffect.createBlurEffect(25f, 25f, Shader.TileMode.MIRROR));
+        }
     }
 
     private static float density = 2.75f; // overwritten by init()

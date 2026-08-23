@@ -22,7 +22,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 4;
+    private static final int DB_VERSION = 5;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -49,6 +49,10 @@ public class MappingDb extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE waypoints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "floor TEXT, label TEXT, x REAL, y REAL)");
+        // Wi-Fi RTT (Round-Trip-Time) ranging results.
+        db.execSQL("CREATE TABLE radio_rtt (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
+                "bssid TEXT, distance_mm INTEGER, stddev_mm INTEGER, rssi INTEGER)");
         // Manually-tagged Wi-Fi place directory (distinct from waypoints
         // above, which tag the dead-reckoned x/y): each row is one BSSID
         // from a live scan captured at the moment the user tapped "여기
@@ -67,6 +71,7 @@ public class MappingDb extends SQLiteOpenHelper {
         db.execSQL("DROP TABLE IF EXISTS motion_samples");
         db.execSQL("DROP TABLE IF EXISTS waypoints");
         db.execSQL("DROP TABLE IF EXISTS place_fingerprints");
+        db.execSQL("DROP TABLE IF EXISTS radio_rtt");
         onCreate(db);
     }
 
@@ -129,6 +134,17 @@ public class MappingDb extends SQLiteOpenHelper {
         cv.put("rssi", rssi);
         cv.put("freq", freq);
         getWritableDatabase().insert("place_fingerprints", null, cv);
+    }
+
+    public void insertRadioRtt(long sessionId, long ts, String bssid, int distMm, int stdDevMm, int rssi) {
+        ContentValues cv = new ContentValues();
+        cv.put("session_id", sessionId);
+        cv.put("ts", ts);
+        cv.put("bssid", bssid);
+        cv.put("distance_mm", distMm);
+        cv.put("stddev_mm", stdDevMm);
+        cv.put("rssi", rssi);
+        getWritableDatabase().insert("radio_rtt", null, cv);
     }
 
     public static class Counts {
@@ -238,25 +254,45 @@ public class MappingDb extends SQLiteOpenHelper {
     }
 
     // Shared by estimateLocationFromFingerprint() and recognizePlace(): RMS
-    // RSSI difference between a live scan and a stored fingerprint over
-    // their shared BSSIDs, with a fixed ~20dB penalty per BSSID present in
-    // one but not the other. Returns -1 (not NaN) when there's no shared
-    // BSSID at all -- not comparable.
+    // Differential RSSI difference between a live scan and a stored fingerprint.
+    // Instead of absolute RSSI, we look at differences relative to the
+    // strongest shared AP (e.g. AP1-AP2, AP1-AP3) to neutralize antenna
+    // gain variations between different phone models/cases.
     private static double fingerprintDistance(java.util.Map<String, Integer> liveRssi,
                                                java.util.Map<String, Integer> otherRssi) {
+        if (liveRssi.isEmpty() || otherRssi.isEmpty()) return -1;
+        
+        // Find strongest shared AP to use as baseline
+        String anchorBssid = null;
+        int maxRssi = -120;
+        for (String bssid : liveRssi.keySet()) {
+            if (otherRssi.containsKey(bssid)) {
+                int r = liveRssi.get(bssid);
+                if (r > maxRssi) { maxRssi = r; anchorBssid = bssid; }
+            }
+        }
+        if (anchorBssid == null) return -1;
+
+        int liveAnchor = liveRssi.get(anchorBssid);
+        int otherAnchor = otherRssi.get(anchorBssid);
+
         double sumSq = 0;
-        int shared = 0;
+        int count = 0;
         for (java.util.Map.Entry<String, Integer> e : liveRssi.entrySet()) {
             Integer other = otherRssi.get(e.getKey());
             if (other != null) {
-                double diff = e.getValue() - other;
-                sumSq += diff * diff;
-                shared++;
+                // Differential RSSI: (RSSI_i - RSSI_anchor)
+                double liveDiff = e.getValue() - liveAnchor;
+                double otherDiff = other - otherAnchor;
+                double error = liveDiff - otherDiff;
+                sumSq += error * error;
+                count++;
             } else {
-                sumSq += 400; // ~20dB mismatch penalty for a BSSID missing here
+                sumSq += 400; // Fixed mismatch penalty
+                count++;
             }
         }
-        return shared == 0 ? -1 : Math.sqrt(sumSq / liveRssi.size());
+        return Math.sqrt(sumSq / count);
     }
 
     // Estimates a position by k-nearest-neighbor matching a live Wi-Fi
@@ -458,6 +494,7 @@ public class MappingDb extends SQLiteOpenHelper {
         out.put("motion_samples", dumpTable(db, "motion_samples"));
         out.put("waypoints", dumpTable(db, "waypoints"));
         out.put("place_fingerprints", dumpTable(db, "place_fingerprints"));
+        out.put("radio_rtt", dumpTable(db, "radio_rtt"));
         return out;
     }
 }

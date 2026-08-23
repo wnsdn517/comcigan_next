@@ -9,6 +9,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.location.Address;
+import android.location.Geocoder;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -81,6 +83,14 @@ public class MainActivity extends Activity {
     private EditText morningTimeInput;
     private EditText[] periodInputs = new EditText[8];
     private EditText neisKeyInput;
+    private CheckBox teacherModeCheck;
+    private EditText teacherNameInput;
+    private LinearLayout studentSettingsBox, teacherSettingsBox;
+    private View onboardingStep1, onboardingStep2, onboardingStep3, onboardingStep4;
+    private TextView onboardingSelectedSchoolLabel;
+    private CheckBox onboardingIsTeacherModeCheck;
+    private LinearLayout onboardingStudentFields, onboardingTeacherFields;
+    private EditText onboardingTeacherNameInput;
 
     private TextView mealStatusText;
     private LinearLayout mealContent;
@@ -128,10 +138,11 @@ public class MainActivity extends Activity {
         loadPrefsIntoUi();
         showPage(prefs.schoolCode().isEmpty() ? 2 : 0);
 
-        if (prefs.onboardingDone() && prefs.mappingConsentDone()) {
+        if (prefs.onboardingDone()) {
             onboardingOverlay.setVisibility(View.GONE);
-            requestNotifPermissionIfNeeded();
             startMappingServiceIfPermitted();
+        } else {
+            onboardingOverlay.setVisibility(View.VISIBLE);
         }
     }
 
@@ -150,32 +161,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void requestNotifPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 33) {
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
-            }
-        }
-    }
 
-    // Location is required to read Wi-Fi scan results, and on API 29+ step
-    // detection needs activity-recognition -- both only asked for at the
-    // moment the user actually starts a mapping session, not up front.
-    private void requestMappingPermissionsIfNeeded(Runnable onGranted) {
-        List<String> needed = new ArrayList<>();
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.ACCESS_FINE_LOCATION);
-        }
-        if (Build.VERSION.SDK_INT >= 29 && checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
-            needed.add(Manifest.permission.ACTIVITY_RECOGNITION);
-        }
-        if (needed.isEmpty()) {
-            onGranted.run();
-            return;
-        }
-        pendingMappingStart = onGranted;
-        requestPermissions(needed.toArray(new String[0]), REQ_MAPPING_PERMS);
-    }
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
@@ -253,71 +239,279 @@ public class MainActivity extends Activity {
     private FrameLayout buildOnboardingOverlay() {
         onboardingOverlay = new FrameLayout(this);
         onboardingOverlay.setBackgroundColor(UiKit.BG);
-        ScrollView scroll = new ScrollView(this);
+        
+        onboardingStep1 = buildStep1();
+        onboardingStep2 = buildStep2();
+        onboardingStep3 = buildStep3();
+        onboardingStep4 = buildStep4();
+        
+        onboardingOverlay.addView(onboardingStep1);
+        onboardingOverlay.addView(onboardingStep2);
+        onboardingOverlay.addView(onboardingStep3);
+        onboardingOverlay.addView(onboardingStep4);
+        
+        onboardingStep2.setVisibility(View.GONE);
+        onboardingStep3.setVisibility(View.GONE);
+        onboardingStep4.setVisibility(View.GONE);
+        
+        return onboardingOverlay;
+    }
+
+    private View buildStep1() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(24), dp(60), dp(24), dp(24));
+
+        TextView title = new TextView(this);
+        title.setText("환영합니다!");
+        title.setTextColor(UiKit.TEXT_PRIMARY);
+        title.setTextSize(32);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        root.addView(title);
+
+        TextView sub = new TextView(this);
+        sub.setText("컴시간알리미+와 함께\n스마트한 학교 생활을 시작해 보세요.");
+        UiKit.styleBody(sub);
+        sub.setPadding(0, dp(12), 0, dp(40));
+        root.addView(sub);
+
+        LinearLayout infoCard = card();
+        infoCard.addView(onboardingLine("📅 시간표 확인", "학교 시간표를 실시간으로 확인하고 변동 사항을 즉시 알려드려요."));
+        infoCard.addView(onboardingLine("🍱 급식 정보", "오늘의 메뉴를 위젯과 알림으로 간편하게 확인하세요."));
+        infoCard.addView(onboardingLine("🧭 실내 지도", "학교 내에서의 위치를 3D로 파악하고 기록할 수 있어요."));
+        root.addView(infoCard, cardLp());
+
+        Button nextBtn = new Button(this);
+        nextBtn.setText("시작하기");
+        UiKit.stylePrimaryButton(nextBtn);
+        LinearLayout.LayoutParams lp = matchWrap();
+        lp.topMargin = dp(40);
+        nextBtn.setOnClickListener(v -> transitionOnboarding(onboardingStep1, onboardingStep2));
+        root.addView(nextBtn, lp);
+        return root;
+    }
+
+    private View buildStep2() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(24), dp(40), dp(24), dp(24));
 
         TextView title = new TextView(this);
-        title.setText("시작하기 전에");
+        title.setText("학교 찾기");
         title.setTextColor(UiKit.TEXT_PRIMARY);
-        title.setTextSize(22);
-        title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setPadding(0, 0, 0, dp(16));
+        title.setTextSize(24);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         root.addView(title);
 
-        LinearLayout infoCard = card();
-        infoCard.addView(onboardingLine("무엇을 하나요", "컴시간(comci.kr) 공개 서비스에서 학교 시간표를 가져와 보여주고, 정해두신 시각에 알림을 보내드려요."));
-        infoCard.addView(onboardingLine("어떤 정보를 쓰나요", "선택하신 학교 코드, 학년, 반, 직접 추가한 개인 일정을 이 기기 안에만 저장합니다."));
-        infoCard.addView(onboardingLine("알림은 어떻게 오나요", "정해진 시각에 앱이 자동으로 시간표를 확인해 알림으로 알려드려요."));
-        infoCard.addView(onboardingLine("급식 정보(선택)", "설정 탭에서 NEIS 공개 API 키를 직접 입력하시면 급식 정보도 볼 수 있어요."));
-        root.addView(infoCard, cardLp());
+        LinearLayout searchCard = card();
+        searchCard.addView(eyebrow("학교 검색"));
+        
+        LinearLayout searchRow = new LinearLayout(this);
+        searchRow.setOrientation(LinearLayout.HORIZONTAL);
+        searchRow.setPadding(0, dp(12), 0, 0);
+        
+        EditText input = new EditText(this);
+        input.setHint("학교 이름을 입력하세요");
+        UiKit.styleInput(input);
+        searchRow.addView(input, weightedWrap());
+        
+        Button btn = new Button(this);
+        btn.setText("검색");
+        UiKit.stylePrimaryButton(btn);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.leftMargin = dp(8);
+        searchRow.addView(btn, blp);
+        searchCard.addView(searchRow);
 
-        TextView permTitle = new TextView(this);
-        permTitle.setText("필요한 권한");
-        permTitle.setTextColor(UiKit.TEXT_PRIMARY);
-        permTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        permTitle.setTextSize(15);
-        permTitle.setPadding(dp(2), dp(4), 0, dp(8));
-        root.addView(permTitle);
+        LinearLayout results = new LinearLayout(this);
+        results.setOrientation(LinearLayout.VERTICAL);
+        results.setPadding(0, dp(12), 0, 0);
+        searchCard.addView(results);
+        root.addView(searchCard, cardLp());
+
+        onboardingSelectedSchoolLabel = new TextView(this);
+        onboardingSelectedSchoolLabel.setText("학교를 선택해 주세요.");
+        UiKit.styleCaption(onboardingSelectedSchoolLabel);
+        onboardingSelectedSchoolLabel.setPadding(dp(4), 0, 0, dp(24));
+        root.addView(onboardingSelectedSchoolLabel);
+
+        btn.setOnClickListener(v -> {
+            String q = input.getText().toString().trim();
+            if (q.isEmpty()) return;
+            results.removeAllViews();
+            results.addView(loadingRow("검색 중..."));
+            ComciganApi.searchSchools(q, (schools, err) -> {
+                results.removeAllViews();
+                if (err != null || schools == null || schools.isEmpty()) {
+                    results.addView(errorRow("학교를 찾지 못했어요."));
+                    return;
+                }
+                for (ComciganApi.School s : schools) {
+                    View row = schoolResultRow(s);
+                    row.setOnClickListener(v2 -> {
+                        pendingSchoolCode = s.code;
+                        pendingSchoolName = s.name;
+                        onboardingSelectedSchoolLabel.setText(s.name + " (선택됨)");
+                        onboardingSelectedSchoolLabel.setTextColor(UiKit.ACCENT);
+                        updateSchoolLocation(s.name);
+                    });
+                    results.addView(row);
+                }
+            });
+        });
+
+        Button nextBtn = new Button(this);
+        nextBtn.setText("다음 단계");
+        UiKit.stylePrimaryButton(nextBtn);
+        nextBtn.setOnClickListener(v -> {
+            if (pendingSchoolCode.isEmpty()) {
+                Toast.makeText(this, "학교를 먼저 선택해 주세요.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            transitionOnboarding(onboardingStep2, onboardingStep3);
+        });
+        root.addView(nextBtn, matchWrap());
+        return root;
+    }
+
+    private View buildStep3() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(24), dp(40), dp(24), dp(24));
+
+        TextView title = new TextView(this);
+        title.setText("정보 설정");
+        title.setTextColor(UiKit.TEXT_PRIMARY);
+        title.setTextSize(24);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        root.addView(title);
+
+        onboardingIsTeacherModeCheck = new CheckBox(this);
+        onboardingIsTeacherModeCheck.setText("선생님이신가요?");
+        onboardingIsTeacherModeCheck.setTextColor(UiKit.TEXT_PRIMARY);
+        onboardingIsTeacherModeCheck.setPadding(0, dp(16), 0, dp(16));
+        root.addView(onboardingIsTeacherModeCheck);
+
+        onboardingStudentFields = new LinearLayout(this);
+        onboardingStudentFields.setOrientation(LinearLayout.VERTICAL);
+        
+        LinearLayout gradeRow = new LinearLayout(this);
+        gradeRow.setOrientation(LinearLayout.HORIZONTAL);
+        
+        LinearLayout gCol = new LinearLayout(this);
+        gCol.setOrientation(LinearLayout.VERTICAL);
+        gCol.addView(fieldLabel("학년"));
+        gradeAuto = makePickerInput(new String[]{"1학년", "2학년", "3학년"});
+        gCol.addView(gradeAuto);
+        
+        LinearLayout cCol = new LinearLayout(this);
+        cCol.setOrientation(LinearLayout.VERTICAL);
+        cCol.addView(fieldLabel("반"));
+        String[] cOpts = new String[20]; for(int i=0;i<20;i++) cOpts[i] = String.valueOf(i+1) + "반";
+        classAuto = makePickerInput(cOpts);
+        cCol.addView(classAuto);
+        
+        gradeRow.addView(gCol, weightedWrap());
+        gradeRow.addView(cCol, weightedWrap());
+        onboardingStudentFields.addView(gradeRow);
+        root.addView(onboardingStudentFields);
+
+        onboardingTeacherFields = new LinearLayout(this);
+        onboardingTeacherFields.setOrientation(LinearLayout.VERTICAL);
+        onboardingTeacherFields.setVisibility(View.GONE);
+        onboardingTeacherFields.addView(fieldLabel("선생님 성함"));
+        onboardingTeacherNameInput = new EditText(this);
+        onboardingTeacherNameInput.setHint("예: 홍길동");
+        UiKit.styleInput(onboardingTeacherNameInput);
+        onboardingTeacherFields.addView(onboardingTeacherNameInput);
+        root.addView(onboardingTeacherFields);
+
+        onboardingIsTeacherModeCheck.setOnCheckedChangeListener((b, checked) -> {
+            onboardingStudentFields.setVisibility(checked ? View.GONE : View.VISIBLE);
+            onboardingTeacherFields.setVisibility(checked ? View.VISIBLE : View.GONE);
+        });
+
+        Button nextBtn = new Button(this);
+        nextBtn.setText("다음 단계");
+        UiKit.stylePrimaryButton(nextBtn);
+        LinearLayout.LayoutParams lp = matchWrap();
+        lp.topMargin = dp(40);
+        nextBtn.setOnClickListener(v -> {
+            if (onboardingIsTeacherModeCheck.isChecked()) {
+                if (onboardingTeacherNameInput.getText().toString().trim().isEmpty()) {
+                    Toast.makeText(this, "성함을 입력해 주세요.", Toast.LENGTH_SHORT).show(); return;
+                }
+            } else {
+                if (gradeAuto.getText().toString().isEmpty() || classAuto.getText().toString().isEmpty()) {
+                    Toast.makeText(this, "학년과 반을 선택해 주세요.", Toast.LENGTH_SHORT).show(); return;
+                }
+            }
+            transitionOnboarding(onboardingStep3, onboardingStep4);
+        });
+        root.addView(nextBtn, lp);
+        return root;
+    }
+
+    private View buildStep4() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(24), dp(40), dp(24), dp(24));
+
+        TextView title = new TextView(this);
+        title.setText("마지막 단계");
+        title.setTextColor(UiKit.TEXT_PRIMARY);
+        title.setTextSize(24);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        root.addView(title);
 
         LinearLayout permCard = card();
-        permCard.addView(onboardingLine("알림", "시간표 변동, 쉬는시간, 아침 시간표 알림을 보내려면 필요해요. 다음 화면에서 허용을 눌러주세요."));
-        permCard.addView(onboardingLine("정확한 알람", "설정하신 시각에 알림이 오차 없이 정확히 오도록 사용해요."));
-        permCard.addView(onboardingLine("기기 재시작 시 실행", "기기를 껐다 켜도 예약해둔 알림이 계속 동작하도록 사용해요."));
-        permCard.addView(onboardingLine("포그라운드 서비스 (Live Notify)", "설정에서 Live Notify를 켜면, 지금 몇 교시인지 상단바에 계속 표시하기 위해 사용해요. 끄면 사용하지 않아요."));
-        permCard.addView(onboardingLine("위치/동작 (실내 지도 제작, 실험 기능)", "학교 실내 위치 지도를 만들기 위해, 걸음/방향 정보와 Wi-Fi 신호 세기를 백그라운드에서 항상 자동으로 수집해요 (켜고 끄는 기능이 아니에요). 이 정보는 특정 인물과 연결되지 않는 익명 데이터이고, 서버로 보내지 않고 이 기기에만 저장돼요. 동의하지 않으면 앱을 사용할 수 없어요."));
+        permCard.addView(onboardingLine("✅ 이용 약관 동의", "서비스 이용을 위한 최소한의 데이터 저장에 동의합니다."));
+        permCard.addView(onboardingLine("🔔 알림 및 위치 권한", "시간표 알림 및 실내 지도 기능을 위해 권한 허용이 필요합니다."));
         root.addView(permCard, cardLp());
 
-        CheckBox agree = new CheckBox(this);
-        agree.setText("위 내용과 권한 사용에 동의하고 시작할게요");
-        agree.setTextColor(UiKit.TEXT_PRIMARY);
-        root.addView(agree);
-
-        Button startBtn = new Button(this);
-        startBtn.setText("시작하기");
-        UiKit.stylePrimaryButton(startBtn);
-        startBtn.setEnabled(false);
-        startBtn.setAlpha(0.5f);
-        LinearLayout.LayoutParams startLp = matchWrap();
-        startLp.topMargin = dp(16);
-        root.addView(startBtn, startLp);
-
-        agree.setOnCheckedChangeListener((b, checked) -> {
-            startBtn.setEnabled(checked);
-            startBtn.setAlpha(checked ? 1f : 0.5f);
-        });
-        startBtn.setOnClickListener(v -> {
+        Button finishBtn = new Button(this);
+        finishBtn.setText("설정 완료");
+        UiKit.stylePrimaryButton(finishBtn);
+        LinearLayout.LayoutParams lp = matchWrap();
+        lp.topMargin = dp(40);
+        finishBtn.setOnClickListener(v -> {
+            // Save Settings
+            prefs.setSchool(pendingSchoolCode, pendingSchoolName);
+            prefs.setTeacherMode(onboardingIsTeacherModeCheck.isChecked());
+            if (onboardingIsTeacherModeCheck.isChecked()) {
+                prefs.setTeacherName(onboardingTeacherNameInput.getText().toString().trim());
+            } else {
+                try {
+                    int g = Integer.parseInt(gradeAuto.getText().toString().replaceAll("[^0-9]", ""));
+                    int c = Integer.parseInt(classAuto.getText().toString().replaceAll("[^0-9]", ""));
+                    prefs.setClass(g, c);
+                } catch (Exception e) { prefs.setClass(1, 1); }
+            }
+            
             prefs.setOnboardingDone(true);
             prefs.setMappingConsentDone(true);
-            onboardingOverlay.setVisibility(View.GONE);
-            requestNotifPermissionIfNeeded();
-            requestMappingPermissionsIfNeeded(this::startMappingServiceIfPermitted);
+            requestAllPermissions(() -> {
+                onboardingOverlay.animate().alpha(0).setDuration(400).withEndAction(() -> {
+                    onboardingOverlay.setVisibility(View.GONE);
+                    startMappingServiceIfPermitted();
+                    loadAllWeeks();
+                    showPage(0);
+                }).start();
+            });
         });
+        root.addView(finishBtn, lp);
+        return root;
+    }
 
-        scroll.addView(root);
-        onboardingOverlay.addView(scroll, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        return onboardingOverlay;
+    private void transitionOnboarding(View from, View to) {
+        from.animate().alpha(0).translationX(-dp(50)).setDuration(300).withEndAction(() -> {
+            from.setVisibility(View.GONE);
+            to.setVisibility(View.VISIBLE);
+            to.setAlpha(0f);
+            to.setTranslationX(dp(50));
+            to.animate().alpha(1f).translationX(0).setDuration(450)
+                    .setInterpolator(new UiKit.SpringInterpolator(0.6)).start();
+        }).start();
     }
 
     private LinearLayout onboardingLine(String head, String body) {
@@ -1434,26 +1628,49 @@ public class MainActivity extends Activity {
         section.addView(selectedCard, cardLp());
 
         LinearLayout fieldsCard = card();
-        fieldsCard.addView(eyebrow("학년 / 반"));
+        fieldsCard.addView(eyebrow("신분 설정"));
+        
+        teacherModeCheck = new CheckBox(this);
+        teacherModeCheck.setText("선생님 모드 사용");
+        teacherModeCheck.setTextColor(UiKit.TEXT_PRIMARY);
+        fieldsCard.addView(teacherModeCheck);
+        
+        studentSettingsBox = new LinearLayout(this);
+        studentSettingsBox.setOrientation(LinearLayout.VERTICAL);
         LinearLayout gradeRow = new LinearLayout(this);
         gradeRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout gradeCol = new LinearLayout(this);
         gradeCol.setOrientation(LinearLayout.VERTICAL);
         gradeCol.addView(fieldLabel("학년"));
-        gradeAuto = makePickerInput(new String[]{"1", "2", "3", "4", "5", "6"});
+        gradeAuto = makePickerInput(new String[]{"1학년", "2학년", "3학년", "4학년", "5학년", "6학년"});
         gradeCol.addView(gradeAuto);
         LinearLayout classCol = new LinearLayout(this);
         classCol.setOrientation(LinearLayout.VERTICAL);
         classCol.addView(fieldLabel("반"));
         String[] classOptions = new String[20];
-        for (int i = 0; i < 20; i++) classOptions[i] = String.valueOf(i + 1);
+        for (int i = 0; i < 20; i++) classOptions[i] = String.valueOf(i + 1) + "반";
         classAuto = makePickerInput(classOptions);
         classCol.addView(classAuto);
-        LinearLayout.LayoutParams gradeLp = weightedWrap();
-        gradeLp.rightMargin = dp(8);
-        gradeRow.addView(gradeCol, gradeLp);
+        gradeRow.addView(gradeCol, weightedWrap());
         gradeRow.addView(classCol, weightedWrap());
-        fieldsCard.addView(gradeRow);
+        studentSettingsBox.addView(gradeRow);
+        fieldsCard.addView(studentSettingsBox);
+        
+        teacherSettingsBox = new LinearLayout(this);
+        teacherSettingsBox.setOrientation(LinearLayout.VERTICAL);
+        teacherSettingsBox.setVisibility(View.GONE);
+        teacherSettingsBox.addView(fieldLabel("선생님 성함"));
+        teacherNameInput = new EditText(this);
+        teacherNameInput.setHint("홍길동");
+        UiKit.styleInput(teacherNameInput);
+        teacherSettingsBox.addView(teacherNameInput);
+        fieldsCard.addView(teacherSettingsBox);
+        
+        teacherModeCheck.setOnCheckedChangeListener((b, checked) -> {
+            studentSettingsBox.setVisibility(checked ? View.GONE : View.VISIBLE);
+            teacherSettingsBox.setVisibility(checked ? View.VISIBLE : View.GONE);
+        });
+        
         section.addView(fieldsCard, cardLp());
 
         LinearLayout btnRow = new LinearLayout(this);
@@ -1681,7 +1898,7 @@ public class MainActivity extends Activity {
         UiKit.stylePrimaryButton(mappingGrantBtn);
         LinearLayout.LayoutParams grantLp = matchWrap();
         grantLp.topMargin = dp(10);
-        mappingGrantBtn.setOnClickListener(v -> requestMappingPermissionsIfNeeded(() -> {
+        mappingGrantBtn.setOnClickListener(v -> requestAllPermissions(() -> {
             startMappingServiceIfPermitted();
             refreshMappingStatus();
         }));
@@ -2424,8 +2641,8 @@ public class MainActivity extends Activity {
             selectedSchoolLabel.setText(prefs.schoolName());
             selectedSchoolLabel.setTextColor(UiKit.TEXT_PRIMARY);
         }
-        gradeAuto.setText(String.valueOf(prefs.grade()));
-        classAuto.setText(String.valueOf(prefs.classNum()));
+        gradeAuto.setText(String.valueOf(prefs.grade()) + "학년");
+        classAuto.setText(String.valueOf(prefs.classNum()) + "반");
         refreshSavedClassesList();
 
         notifyChangeCheck.setChecked(prefs.notifyChange());
@@ -2436,6 +2653,13 @@ public class MainActivity extends Activity {
         morningTimeInput.setText(prefs.morningTime());
         for (int i = 0; i < 8; i++) periodInputs[i].setText(prefs.periodTime(i + 1));
         neisKeyInput.setText(prefs.neisApiKey());
+
+        if (teacherModeCheck != null) {
+            teacherModeCheck.setChecked(prefs.isTeacherMode());
+            teacherNameInput.setText(prefs.teacherName());
+            studentSettingsBox.setVisibility(prefs.isTeacherMode() ? View.GONE : View.VISIBLE);
+            teacherSettingsBox.setVisibility(prefs.isTeacherMode() ? View.VISIBLE : View.GONE);
+        }
     }
 
     private LinearLayout.LayoutParams matchWrap() {
@@ -2444,6 +2668,43 @@ public class MainActivity extends Activity {
 
     private LinearLayout.LayoutParams weightedWrap() {
         return new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+    }
+
+    private void updateSchoolLocation(String schoolName) {
+        if (schoolName == null || schoolName.isEmpty()) return;
+        new Thread(() -> {
+            try {
+                Geocoder geocoder = new Geocoder(this, Locale.KOREA);
+                List<Address> addresses = geocoder.getFromLocationName(schoolName, 1);
+                if (addresses != null && !addresses.isEmpty()) {
+                    Address addr = addresses.get(0);
+                    prefs.setSchoolLocation((float) addr.getLatitude(), (float) addr.getLongitude());
+                    runOnUiThread(() -> Toast.makeText(this, "학교 위치가 자동으로 설정되었습니다.", Toast.LENGTH_SHORT).show());
+                }
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }).start();
+    }
+
+    private void requestAllPermissions(Runnable onDone) {
+        List<String> needed = new ArrayList<>();
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.ACCESS_FINE_LOCATION);
+        }
+        if (Build.VERSION.SDK_INT >= 29 && checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) != PackageManager.PERMISSION_GRANTED) {
+            needed.add(Manifest.permission.ACTIVITY_RECOGNITION);
+        }
+
+        if (needed.isEmpty()) {
+            onDone.run();
+            return;
+        }
+        pendingMappingStart = onDone;
+        requestPermissions(needed.toArray(new String[0]), REQ_MAPPING_PERMS);
     }
 
     private int dp(int v) { return UiKit.dp(v); }
