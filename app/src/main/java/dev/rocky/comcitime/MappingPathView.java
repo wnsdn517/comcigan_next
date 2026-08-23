@@ -18,10 +18,10 @@ import java.util.List;
 // MappingDb.estimateApPositions for the Wi-Fi AP position estimates
 // plotted alongside it. One finger dragged left/right spins the view
 // around the vertical axis (userYawDeg); two fingers dragged up/down tilt
-// the elevation angle (userPitchDeg); three fingers dragged up/down pan
-// the view (userPanY) and pinched apart/together zoom it (userZoom).
-// resetView() (wired to a "현위치 보기" button in MainActivity) snaps all
-// four back to their defaults.
+// the elevation angle (userPitchDeg); three fingers dragged in any
+// direction pan the view (userPanX/userPanY) and pinched apart/together
+// zoom it (userZoom). resetView() (wired to a "현위치 보기" button in
+// MainActivity) snaps all four back to their defaults.
 public class MappingPathView extends View {
 
     private List<double[]> path = new ArrayList<>();
@@ -30,10 +30,11 @@ public class MappingPathView extends View {
 
     // View-control state, all driven by touch gestures in onTouchEvent()
     // -- see the class doc above for which gesture controls which field.
-    // 0/0/1/0 (yaw/pitch/zoom/panY) is the original fixed-angle view.
+    // 0/0/1/0/0 (yaw/pitch/zoom/panX/panY) is the original fixed-angle view.
     private float userYawDeg = 0f;
     private float userPitchDeg = 0f;
     private float userZoom = 1f;
+    private float userPanX = 0f;
     private float userPanY = 0f;
     private static final float ROTATE_SENSITIVITY = 0.4f; // degrees rotated per pixel dragged (1 finger)
     private static final float PITCH_SENSITIVITY = 0.3f; // degrees tilted per pixel dragged (2 fingers)
@@ -49,6 +50,7 @@ public class MappingPathView extends View {
     private int gestureMode = MODE_YAW;
     private int lastPointerCount = 0;
     private float lastTouchX = 0f;
+    private float lastAvgX = 0f;
     private float lastAvgY = 0f;
     private float lastAvgSpacing = 0f;
 
@@ -96,6 +98,7 @@ public class MappingPathView extends View {
         userYawDeg = 0f;
         userPitchDeg = 0f;
         userZoom = 1f;
+        userPanX = 0f;
         userPanY = 0f;
         invalidate();
     }
@@ -151,32 +154,41 @@ public class MappingPathView extends View {
             lastAvgY = averageY(event);
         } else {
             gestureMode = MODE_PAN_ZOOM;
+            lastAvgX = averageX(event);
             lastAvgY = averageY(event);
             lastAvgSpacing = centroidSpread(event);
         }
     }
 
+    // Directions below are all inverted from the naive "delta follows the
+    // finger" mapping -- reported as feeling backwards once actually used
+    // on a device, so every axis here is negated relative to the raw
+    // touch delta.
     private void applyGestureDelta(MotionEvent event) {
         switch (gestureMode) {
             case MODE_YAW: {
                 float x = event.getX(0);
                 float dx = x - lastTouchX;
                 lastTouchX = x;
-                userYawDeg = (userYawDeg + dx * ROTATE_SENSITIVITY) % 360f;
+                userYawDeg = (userYawDeg - dx * ROTATE_SENSITIVITY) % 360f;
                 break;
             }
             case MODE_PITCH: {
                 float avgY = averageY(event);
                 float dy = avgY - lastAvgY;
                 lastAvgY = avgY;
-                userPitchDeg = clamp(userPitchDeg - dy * PITCH_SENSITIVITY, MIN_PITCH_OFFSET, MAX_PITCH_OFFSET);
+                userPitchDeg = clamp(userPitchDeg + dy * PITCH_SENSITIVITY, MIN_PITCH_OFFSET, MAX_PITCH_OFFSET);
                 break;
             }
             case MODE_PAN_ZOOM: {
+                float avgX = averageX(event);
                 float avgY = averageY(event);
+                float dx = avgX - lastAvgX;
                 float dy = avgY - lastAvgY;
+                lastAvgX = avgX;
                 lastAvgY = avgY;
-                userPanY += dy;
+                userPanX -= dx;
+                userPanY -= dy;
 
                 float spacing = centroidSpread(event);
                 if (lastAvgSpacing > 1f && spacing > 1f) {
@@ -187,6 +199,13 @@ public class MappingPathView extends View {
                 break;
             }
         }
+    }
+
+    private static float averageX(MotionEvent e) {
+        int n = e.getPointerCount();
+        float sum = 0;
+        for (int i = 0; i < n; i++) sum += e.getX(i);
+        return sum / n;
     }
 
     private static float averageY(MotionEvent e) {
@@ -321,10 +340,10 @@ public class MappingPathView extends View {
 
     // Final screen pixels for one world point: the rotated/tilted
     // isoCoords() above, scaled by the auto-fit `scale` times the user's
-    // pinch-zoom (userZoom), then panned in screen space by userPanY.
+    // pinch-zoom (userZoom), then panned in screen space by userPanX/userPanY.
     private float[] project(double x, double y, float cx, float cy, double scale, double midX, double midY) {
         double[] iso = isoCoords(x, y, midX, midY);
-        float sx = (float) (cx + iso[0] * scale * userZoom);
+        float sx = (float) (cx + iso[0] * scale * userZoom) + userPanX;
         float sy = (float) (cy + iso[1] * scale * userZoom) + userPanY;
         return new float[]{sx, sy};
     }

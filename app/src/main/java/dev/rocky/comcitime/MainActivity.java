@@ -30,6 +30,7 @@ import android.widget.TableRow;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -1709,7 +1710,7 @@ public class MainActivity extends Activity {
         pathLp.topMargin = dp(8);
         pathCard.addView(mappingPathView, pathLp);
         TextView pathLegend = new TextView(this);
-        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치\n손가락 1개 좌우로 회전 · 2개 상하로 기울기 · 3개 상하로 이동 · 오므리고 벌려서 확대축소");
+        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치\n손가락 1개 좌우로 회전 · 2개 상하로 기울기 · 3개로 상하좌우 이동 · 오므리고 벌려서 확대축소");
         UiKit.styleCaption(pathLegend);
         pathLegend.setPadding(0, dp(4), 0, 0);
         pathCard.addView(pathLegend);
@@ -1878,6 +1879,7 @@ public class MainActivity extends Activity {
             try {
                 MappingDb db = new MappingDb(this);
                 JSONObject data = db.exportAllData();
+                addLiveSensorData(data);
                 File dir = getExternalFilesDir("exports");
                 if (dir == null) dir = new File(getFilesDir(), "exports");
                 if (!dir.exists()) dir.mkdirs();
@@ -1893,6 +1895,75 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> Toast.makeText(this, "내보내기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
             }
         }).start();
+    }
+
+    // Adds a "live_sensor_data" section to the export with everything the
+    // currently-running collector is tracking that ISN'T in MappingDb's
+    // tables -- raw accelerometer/gyroscope/magnetometer/pressure/RSSI
+    // rolling history (kept only in memory for the Settings debug graphs,
+    // per MappingCollector's class doc) plus the latest single-sample
+    // values and derived state (heading fusion reliability, gait/place
+    // recognition). A no-op if collection isn't currently running -- the
+    // DB dump above still has everything ever actually recorded to disk.
+    private void addLiveSensorData(JSONObject data) throws org.json.JSONException {
+        MappingCollector running = MappingService.getRunningCollector();
+        if (running == null) return;
+
+        JSONObject live = new JSONObject();
+        live.put("history_count", running.getHistoryCount());
+        live.put("accel_x_history", floatArrayToJson(running.getAccelXHistory()));
+        live.put("accel_y_history", floatArrayToJson(running.getAccelYHistory()));
+        live.put("accel_z_history", floatArrayToJson(running.getAccelZHistory()));
+        live.put("gyro_x_history", floatArrayToJson(running.getGyroXHistory()));
+        live.put("gyro_y_history", floatArrayToJson(running.getGyroYHistory()));
+        live.put("gyro_z_history", floatArrayToJson(running.getGyroZHistory()));
+        live.put("mag_x_history", floatArrayToJson(running.getMagXHistory()));
+        live.put("mag_y_history", floatArrayToJson(running.getMagYHistory()));
+        live.put("mag_z_history", floatArrayToJson(running.getMagZHistory()));
+        live.put("gyro_yaw_history", floatArrayToJson(running.getGyroYawHistory()));
+        live.put("pressure_history", floatArrayToJson(running.getPressureHistory()));
+        live.put("rssi_history", floatArrayToJson(running.getRssiHistory()));
+
+        live.put("heading_deg", running.getHeadingDeg());
+        live.put("pitch_deg", running.getPitchDeg());
+        live.put("roll_deg", running.getRollDeg());
+        live.put("pressure_hpa", running.getPressureHpa());
+        live.put("last_top_rssi", running.getLastTopRssi());
+        live.put("screen_rotation_deg", running.getScreenRotationDeg());
+        live.put("last_lat", Double.isNaN(running.getLastLat()) ? JSONObject.NULL : (Object) running.getLastLat());
+        live.put("last_lon", Double.isNaN(running.getLastLon()) ? JSONObject.NULL : (Object) running.getLastLon());
+        live.put("step_count", running.getStepCount());
+        live.put("pos_x", running.getPosX());
+        live.put("pos_y", running.getPosY());
+        live.put("position_uncertainty_m", running.getPositionUncertaintyM());
+        live.put("estimated_floor_delta", running.getEstimatedFloorDelta());
+        live.put("last_step_length_m", running.getLastStepLengthM());
+        live.put("is_stationary", running.isStationary());
+        live.put("is_in_gait_streak", running.isInGaitStreak());
+        live.put("is_magnetic_reliable", running.isMagneticReliable());
+
+        MappingDb.PlaceMatch place = running.getLastPlaceMatch();
+        if (place != null) {
+            JSONObject placeJson = new JSONObject();
+            placeJson.put("floor", place.floor);
+            placeJson.put("label", place.label);
+            placeJson.put("avg_match_distance", place.avgMatchDistance);
+            live.put("last_place_match", placeJson);
+        }
+
+        JSONObject scanJson = new JSONObject();
+        for (java.util.Map.Entry<String, Integer> e : running.getLastScanRssi().entrySet()) {
+            scanJson.put(e.getKey(), e.getValue());
+        }
+        live.put("last_wifi_scan_rssi", scanJson);
+
+        data.put("live_sensor_data", live);
+    }
+
+    private JSONArray floatArrayToJson(float[] values) throws org.json.JSONException {
+        JSONArray arr = new JSONArray();
+        for (float v : values) arr.put(v);
+        return arr;
     }
 
     private void refreshMappingStatus() {
