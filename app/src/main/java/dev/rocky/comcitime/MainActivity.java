@@ -1709,7 +1709,7 @@ public class MainActivity extends Activity {
         pathLp.topMargin = dp(8);
         pathCard.addView(mappingPathView, pathLp);
         TextView pathLegend = new TextView(this);
-        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치 · 손가락으로 좌우로 밀면 회전");
+        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치\n손가락 1개 좌우로 회전 · 2개 상하로 기울기 · 3개 상하로 이동 · 오므리고 벌려서 확대축소");
         UiKit.styleCaption(pathLegend);
         pathLegend.setPadding(0, dp(4), 0, 0);
         pathCard.addView(pathLegend);
@@ -1970,11 +1970,12 @@ public class MainActivity extends Activity {
                 "방위(heading) %.0f°  기울기(pitch) %.0f°  좌우기울기(roll) %.0f°\n" +
                         "걸음 수 %d  위치 (%.1f, %.1f) m ±%.1fm  원점에서 %.1fm\n" +
                         "추정 층 변화 %+d층  화면 방향 %d°  GPS %s\n" +
-                        "정지 상태 %s  보행 확정 %s\n" +
+                        "정지 상태 %s  보행 확정 %s  나침반 신뢰 %s\n" +
                         "Wi-Fi 추정 장소 %s",
                 heading, pitch, roll, steps, x, y, running.getPositionUncertaintyM(), dist,
                 running.getEstimatedFloorDelta(), running.getScreenRotationDeg(), gps,
                 running.isStationary() ? "예" : "아니오", running.isInGaitStreak() ? "예" : "아니오",
+                running.isMagneticReliable() ? "예" : "아니오",
                 placeStr));
         if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
         if (mappingStrideText != null) {

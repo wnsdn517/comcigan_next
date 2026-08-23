@@ -34,23 +34,37 @@ import java.util.concurrent.Executors;
 // that IS persisted goes through MappingDb on-device only -- there is no
 // network upload in this build.
 //
-// Dead reckoning deliberately avoids two things a naive implementation
+// Dead reckoning deliberately avoids one thing a naive implementation
 // would lean on:
-//  - The magnetometer-fused compass heading, for the direction of travel.
-//    Indoors, magnetic fields are heavily distorted by rebar/wiring/metal
-//    furniture, so a compass heading can be badly wrong right where this
-//    matters most. Instead, direction is tracked by integrating the raw
-//    gyroscope's yaw rate (gyroYawDeg below), only softly pulled toward
-//    the fused heading a few percent per reading (HEADING_COMPASS_PULL)
-//    -- immune to any single bad magnetometer reading, but still bounded
-//    so per-sample gyro bias can't compound into unlimited drift over a
-//    long walk, with the Wi-Fi fingerprint correction below as a second
-//    line of defense on top of that.
 //  - A fixed, user-entered stride length, for step distance. Actual
 //    stride varies with walking speed and isn't something most people
 //    know precisely. Instead each step's length is estimated from that
 //    step's own accelerometer swing via Weinberg's formula (see
 //    estimateStepLength()), a standard step-length-estimation technique.
+//
+// Direction of travel is the magnetometer-fused compass heading
+// (headingDeg) by default -- it's an absolute reference with no drift,
+// unlike a gyroscope, so it's the better default whenever it can be
+// trusted. The problem is exactly that "whenever": indoors, magnetic
+// fields near rebar/wiring/metal furniture can be badly distorted right
+// where this matters most, silently. updateMagneticReliability() (fed by
+// TYPE_MAGNETIC_FIELD) runs the two-signal disturbance detector from the
+// PDR/AHRS literature -- Afzal, Renaudin & Lachapelle (2011), "Magnetic
+// Perturbations Detection and Heading Estimation Using Magnetometers"
+// (magnitude-and-angle-based detector), and Fan et al. (2014), "Accurate
+// Orientation Estimation Using AHRS under Conditions of Magnetic
+// Distortion" (dip-angle-vs-gravity consistency): a locally undisturbed
+// field keeps (a) a magnitude within Earth's ~25-65 microtesla range and
+// (b) a dip angle relative to gravity that stays essentially constant
+// over a short window, since it's a fixed geophysical property of the
+// location, not something a straight walk would change. Either signal
+// breaking flags magneticReliable = false. While reliable, gyroYawDeg
+// (the gyroscope's integrated yaw) is pulled hard toward headingDeg so
+// it's ready to take over accurately the instant reliability drops; while
+// unreliable, that pull is cut to zero (a known-bad compass reading can't
+// corrupt it) and gyroYawDeg free-integrates alone as the fallback
+// direction source (see the TYPE_ROTATION_VECTOR case and applyStep()'s
+// dirDeg selection) until the compass is trustworthy again.
 //
 // Steps themselves come from a custom accelerometer peak-detector
 // (processCustomStepDetection()) instead of the platform's hardware
@@ -128,16 +142,29 @@ public class MappingCollector {
     private double gyroYawDeg = Double.NaN;
     private long lastGyroTimestampNs = 0;
     // Fraction of the gyro-vs-compass heading gap corrected per fused-
-    // heading update (~SENSOR_DELAY_UI, tens of ms). Bumped up from an
-    // initial 0.02 once the gyro's CW/CCW sign convention was fixed (see
-    // the TYPE_GYROSCOPE case below) -- with the sign right, a larger
-    // pull catches up to the compass faster without overshooting.
-    private static final double HEADING_COMPASS_PULL = 0.05;
+    // heading update (~SENSOR_DELAY_UI, tens of ms), applied only while
+    // magneticReliable (see class doc/updateMagneticReliability()) -- the
+    // compass is primary direction source while reliable, so gyroYawDeg
+    // only needs to stay resynced and ready as the fallback, not do the
+    // steering itself. Pull is cut to zero entirely during a detected
+    // disturbance (see the TYPE_ROTATION_VECTOR case below).
+    private static final double HEADING_COMPASS_PULL = 0.3;
     // While the phone is detected stationary (see processStationaryDetection()),
     // pull harder toward the compass heading -- a compass reading isn't
-    // being muddied by step-related vibration/magnetic noise right then,
-    // so it's safe to trust more.
-    private static final double HEADING_COMPASS_PULL_STATIONARY = 0.15;
+    // being muddied by step-related vibration right then, so it's safe to
+    // resync gyroYawDeg even faster.
+    private static final double HEADING_COMPASS_PULL_STATIONARY = 0.5;
+
+    // Magnetic disturbance detection (see class doc for the two papers
+    // this follows). A locally undisturbed field has a magnitude in
+    // Earth's normal range and a dip angle (relative to gravity) that
+    // stays essentially constant over a short window; indoor ferrous/
+    // electrical interference breaks one or both, so both are checked.
+    private static final float MAG_MIN_UT = 20f, MAG_MAX_UT = 70f; // Earth's ~25-65uT, widened for sensor noise
+    private static final float DIP_VARIANCE_THRESHOLD_DEG2 = 9f; // ~3 degree stdev
+    private final float[] dipAngleWindow = new float[10];
+    private int dipAngleWindowIdx = 0;
+    private boolean magneticReliable = true;
 
     // Running min/max of accelerometer magnitude since the last step,
     // feeding Weinberg's per-step dynamic stride-length estimate (see
@@ -270,19 +297,16 @@ public class MappingCollector {
                     if (Double.isNaN(gyroYawDeg)) {
                         gyroYawDeg = headingDeg; // one-time bootstrap
                     } else {
-                        // Continuous small pull toward the compass heading
-                        // so gyro-integration bias doesn't drift forever
-                        // over a long session (see class doc) -- a fixed
-                        // one-time bootstrap alone lets small per-sample
-                        // gyro error compound into a growing rotation over
-                        // many minutes, which is what a walked loop not
-                        // closing on itself looks like. The weight is kept
-                        // small so a single bad indoor-magnetic reading
-                        // can't yank heading off course either, except
-                        // while stationary (see field doc) when it's safe
-                        // to trust the compass more.
+                        // Keeps gyroYawDeg resynced to the compass while
+                        // the compass is trusted (see class doc), so it's
+                        // ready to take over accurately the instant
+                        // magneticReliable flips false. Pull is cut to
+                        // zero during a detected disturbance -- a
+                        // known-bad compass reading must never steer the
+                        // fallback source that's about to be relied on.
                         double diff = shortestAngleDiffDeg(headingDeg, gyroYawDeg);
-                        double pull = isStationary ? HEADING_COMPASS_PULL_STATIONARY : HEADING_COMPASS_PULL;
+                        double pull = !magneticReliable ? 0
+                                : (isStationary ? HEADING_COMPASS_PULL_STATIONARY : HEADING_COMPASS_PULL);
                         gyroYawDeg = ((gyroYawDeg + diff * pull) % 360 + 360) % 360;
                     }
                     break;
@@ -321,6 +345,7 @@ public class MappingCollector {
                     break;
                 case Sensor.TYPE_MAGNETIC_FIELD:
                     magX = event.values[0]; magY = event.values[1]; magZ = event.values[2];
+                    updateMagneticReliability();
                     break;
                 case Sensor.TYPE_PRESSURE:
                     pressureHpa = event.values[0];
@@ -342,6 +367,49 @@ public class MappingCollector {
     // (e.g. target=5, current=355) would pull the wrong way around.
     private static double shortestAngleDiffDeg(double target, double current) {
         return (target - current + 540) % 360 - 180;
+    }
+
+    // Angle between the magnetic field vector and the (accelerometer-
+    // approximated) gravity vector -- the "dip angle" used by
+    // updateMagneticReliability() below. Using the raw accelerometer as a
+    // gravity proxy (rather than a separately low-pass-filtered gravity
+    // estimate) is an approximation, but adequate here: dip-angle
+    // consistency is checked over a rolling window (see dipAngleWindow),
+    // so brief accelerometer noise from motion washes out the same way
+    // sensor noise does, without needing a dedicated gravity filter.
+    private static double dipAngleDeg(float magX, float magY, float magZ,
+                                       float accelX, float accelY, float accelZ) {
+        double dot = magX * accelX + magY * accelY + magZ * accelZ;
+        double magMag = Math.sqrt(magX * magX + magY * magY + magZ * magZ);
+        double accelMag = Math.sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ);
+        if (magMag < 1e-3 || accelMag < 1e-3) return 90;
+        double cos = Math.max(-1, Math.min(1, dot / (magMag * accelMag)));
+        return Math.toDegrees(Math.acos(cos));
+    }
+
+    // Magnetic disturbance detector (see class doc for the two papers this
+    // follows): flags magneticReliable = false when either the field
+    // magnitude leaves Earth's normal range, or the dip angle relative to
+    // gravity -- a fixed geophysical property of the current location --
+    // starts varying more than sensor noise alone would explain. Checking
+    // dip-angle *variance* over a rolling window rather than comparing to
+    // an absolute expected dip avoids needing to know Korea's actual
+    // magnetic dip in advance; only its short-term stability matters.
+    private void updateMagneticReliability() {
+        float magMagnitude = vectorMag(new float[]{magX, magY, magZ});
+        boolean magnitudeOk = magMagnitude >= MAG_MIN_UT && magMagnitude <= MAG_MAX_UT;
+
+        double dip = dipAngleDeg(magX, magY, magZ, accelX, accelY, accelZ);
+        dipAngleWindow[dipAngleWindowIdx] = (float) dip;
+        dipAngleWindowIdx = (dipAngleWindowIdx + 1) % dipAngleWindow.length;
+        float mean = 0;
+        for (float v : dipAngleWindow) mean += v;
+        mean /= dipAngleWindow.length;
+        float variance = 0;
+        for (float v : dipAngleWindow) variance += (v - mean) * (v - mean);
+        variance /= dipAngleWindow.length;
+
+        magneticReliable = magnitudeOk && variance < DIP_VARIANCE_THRESHOLD_DEG2;
     }
 
     // Weinberg's dynamic step-length formula: length = K * (a_max - a_min)^(1/4),
@@ -383,7 +451,11 @@ public class MappingCollector {
     private void onPeakDetected(long now) {
         long gapMs = now - lastStepTimeMs;
         double stepLen = estimateStepLength();
-        double dirDeg = Double.isNaN(gyroYawDeg) ? headingDeg : gyroYawDeg;
+        // Compass primary, gyro fallback (see class doc): use headingDeg
+        // whenever the magnetometer is currently trustworthy, and only
+        // fall back to the free-integrating gyroYawDeg while a magnetic
+        // disturbance is detected (or before the gyro has bootstrapped).
+        double dirDeg = (!magneticReliable && !Double.isNaN(gyroYawDeg)) ? gyroYawDeg : headingDeg;
         accelMinInStep = Float.MAX_VALUE;
         accelMaxInStep = -Float.MAX_VALUE;
 
@@ -490,6 +562,7 @@ public class MappingCollector {
     public double getPosY() { return posY; }
     public boolean isStationary() { return isStationary; }
     public boolean isInGaitStreak() { return inGaitStreak; }
+    public boolean isMagneticReliable() { return magneticReliable; }
 
     public float getPressureHpa() { return pressureHpa; }
     public int getLastTopRssi() { return lastTopRssi; }
@@ -592,6 +665,9 @@ public class MappingCollector {
         accelMaxInStep = -Float.MAX_VALUE;
         inGaitStreak = false;
         pendingStepPresent = false;
+        magneticReliable = true;
+        java.util.Arrays.fill(dipAngleWindow, 0f);
+        dipAngleWindowIdx = 0;
         sessionId = db.startSession();
 
         ctx.registerReceiver(scanReceiver, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
