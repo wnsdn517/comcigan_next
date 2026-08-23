@@ -91,6 +91,7 @@ public class MainActivity extends Activity {
     private CheckBox onboardingIsTeacherModeCheck;
     private LinearLayout onboardingStudentFields, onboardingTeacherFields;
     private EditText onboardingTeacherNameInput;
+    private AutoCompleteTextView onboardingGradeAuto, onboardingClassAuto;
 
     private TextView mealStatusText;
     private LinearLayout mealContent;
@@ -401,15 +402,15 @@ public class MainActivity extends Activity {
         LinearLayout gCol = new LinearLayout(this);
         gCol.setOrientation(LinearLayout.VERTICAL);
         gCol.addView(fieldLabel("학년"));
-        gradeAuto = makePickerInput(new String[]{"1학년", "2학년", "3학년"});
-        gCol.addView(gradeAuto);
+        onboardingGradeAuto = makePickerInput(new String[]{"1학년", "2학년", "3학년"});
+        gCol.addView(onboardingGradeAuto);
         
         LinearLayout cCol = new LinearLayout(this);
         cCol.setOrientation(LinearLayout.VERTICAL);
         cCol.addView(fieldLabel("반"));
-        String[] cOpts = new String[20]; for(int i=0;i<20;i++) cOpts[i] = String.valueOf(i+1) + "반";
-        classAuto = makePickerInput(cOpts);
-        cCol.addView(classAuto);
+        String[] cOpts = new String[20]; for(int i=0;i<20;i++) cOpts[i] = (i+1) + "반";
+        onboardingClassAuto = makePickerInput(cOpts);
+        cCol.addView(onboardingClassAuto);
         
         gradeRow.addView(gCol, weightedWrap());
         gradeRow.addView(cCol, weightedWrap());
@@ -442,7 +443,7 @@ public class MainActivity extends Activity {
                     Toast.makeText(this, "성함을 입력해 주세요.", Toast.LENGTH_SHORT).show(); return;
                 }
             } else {
-                if (gradeAuto.getText().toString().isEmpty() || classAuto.getText().toString().isEmpty()) {
+                if (onboardingGradeAuto.getText().toString().isEmpty() || onboardingClassAuto.getText().toString().isEmpty()) {
                     Toast.makeText(this, "학년과 반을 선택해 주세요.", Toast.LENGTH_SHORT).show(); return;
                 }
             }
@@ -482,8 +483,8 @@ public class MainActivity extends Activity {
                 prefs.setTeacherName(onboardingTeacherNameInput.getText().toString().trim());
             } else {
                 try {
-                    int g = Integer.parseInt(gradeAuto.getText().toString().replaceAll("[^0-9]", ""));
-                    int c = Integer.parseInt(classAuto.getText().toString().replaceAll("[^0-9]", ""));
+                    int g = Integer.parseInt(onboardingGradeAuto.getText().toString().replaceAll("[^0-9]", ""));
+                    int c = Integer.parseInt(onboardingClassAuto.getText().toString().replaceAll("[^0-9]", ""));
                     prefs.setClass(g, c);
                 } catch (Exception e) { prefs.setClass(1, 1); }
             }
@@ -493,6 +494,7 @@ public class MainActivity extends Activity {
             requestAllPermissions(() -> {
                 onboardingOverlay.animate().alpha(0).setDuration(400).withEndAction(() -> {
                     onboardingOverlay.setVisibility(View.GONE);
+                    loadPrefsIntoUi();
                     startMappingServiceIfPermitted();
                     loadAllWeeks();
                     showPage(0);
