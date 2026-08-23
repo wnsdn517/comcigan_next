@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.view.MotionEvent;
 import android.view.View;
 
 import java.util.ArrayList;
@@ -15,12 +16,21 @@ import java.util.List;
 // dependency for one small debug view. See MappingCollector for how the
 // path itself is computed (steps x heading, not typed in by hand), and
 // MappingDb.estimateApPositions for the Wi-Fi AP position estimates
-// plotted alongside it.
+// plotted alongside it. Dragging left/right spins the view around the
+// vertical axis (userYawDeg below); resetView() (wired to a "현위치 보기"
+// button in MainActivity) snaps back to the default angle.
 public class MappingPathView extends View {
 
     private List<double[]> path = new ArrayList<>();
     private double curX = 0, curY = 0;
     private List<MappingDb.ApEstimate> apEstimates = new ArrayList<>();
+
+    // Extra yaw rotation on top of the base 45-degree isometric angle,
+    // driven by horizontal drag (see onTouchEvent()). 0 = the original
+    // fixed-angle view.
+    private float userYawDeg = 0f;
+    private float lastTouchX = 0f;
+    private static final float ROTATE_SENSITIVITY = 0.4f; // degrees rotated per pixel dragged
 
     private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pathPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -57,6 +67,39 @@ public class MappingPathView extends View {
     public void setApEstimates(List<MappingDb.ApEstimate> apEstimates) {
         this.apEstimates = apEstimates != null ? apEstimates : new ArrayList<>();
         invalidate();
+    }
+
+    // Snaps back to the default (non-rotated) viewing angle -- wired to
+    // the "현위치 보기" button, since dragging away from it is otherwise
+    // the only way to change what this view shows.
+    public void resetView() {
+        userYawDeg = 0f;
+        invalidate();
+    }
+
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                lastTouchX = event.getX();
+                // This view sits inside a vertically scrolling Settings
+                // page -- claim the gesture for rotation instead of
+                // letting the ScrollView steal it as a page scroll.
+                if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(true);
+                return true;
+            case MotionEvent.ACTION_MOVE:
+                float dx = event.getX() - lastTouchX;
+                lastTouchX = event.getX();
+                userYawDeg = (userYawDeg + dx * ROTATE_SENSITIVITY) % 360f;
+                invalidate();
+                return true;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (getParent() != null) getParent().requestDisallowInterceptTouchEvent(false);
+                return true;
+            default:
+                return super.onTouchEvent(event);
+        }
     }
 
     @Override
@@ -139,10 +182,22 @@ public class MappingPathView extends View {
         canvas.drawPath(diamond, paint);
     }
 
+    // Isometric projection at a fixed elevation angle, rotated around the
+    // vertical axis by (45 degrees + userYawDeg). At userYawDeg == 0 this
+    // is exactly the original fixed formula: rotating (dx, dy) by 45
+    // degrees gives ((dx-dy), (dx+dy)) * cos(45), and the 1.2247/0.7071
+    // factors below (sqrt(1.5) and 1/sqrt(2)) are the same fixed
+    // horizontal-stretch/vertical-squash that made that look isometric --
+    // dragging just varies the rotation angle that stretch/squash is
+    // applied at, so the whole grid/path/dots spin together, still "flat"
+    // on the same virtual floor.
     private float[] project(double x, double y, float cx, float cy, double scale, double midX, double midY) {
         double dx = x - midX, dy = y - midY;
-        double isoX = (dx - dy) * 0.866;
-        double isoY = (dx + dy) * 0.5;
+        double theta = Math.toRadians(45 + userYawDeg);
+        double rx = dx * Math.cos(theta) - dy * Math.sin(theta);
+        double ry = dx * Math.sin(theta) + dy * Math.cos(theta);
+        double isoX = rx * 1.22474; // sqrt(1.5)
+        double isoY = ry * 0.70711; // 1/sqrt(2)
         return new float[]{(float) (cx + isoX * scale), (float) (cy + isoY * scale)};
     }
 

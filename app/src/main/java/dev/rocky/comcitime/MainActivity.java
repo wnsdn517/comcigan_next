@@ -1709,10 +1709,22 @@ public class MainActivity extends Activity {
         pathLp.topMargin = dp(8);
         pathCard.addView(mappingPathView, pathLp);
         TextView pathLegend = new TextView(this);
-        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치");
+        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치 · 손가락으로 좌우로 밀면 회전");
         UiKit.styleCaption(pathLegend);
         pathLegend.setPadding(0, dp(4), 0, 0);
         pathCard.addView(pathLegend);
+
+        Button resetViewBtn = new Button(this);
+        resetViewBtn.setText("현위치 보기 (회전 초기화)");
+        resetViewBtn.setTextSize(11);
+        UiKit.styleSecondaryButton(resetViewBtn);
+        LinearLayout.LayoutParams resetViewLp = matchWrap();
+        resetViewLp.topMargin = dp(8);
+        resetViewBtn.setOnClickListener(v -> {
+            if (mappingPathView != null) mappingPathView.resetView();
+        });
+        pathCard.addView(resetViewBtn, resetViewLp);
+
         section.addView(pathCard, cardLp());
 
         LinearLayout rawCard = card();
