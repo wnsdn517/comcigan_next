@@ -129,7 +129,13 @@ public class MainActivity extends Activity {
             container.addView(p, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
         outerCol.addView(container, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        outerCol.addView(buildBottomNav());
+        // Explicit fixed height, not WRAP_CONTENT: LiquidGlassBottomTabs'
+        // indicator/tabRow children are MATCH_PARENT height, and a
+        // WRAP_CONTENT parent measuring MATCH_PARENT children against an
+        // unresolved AT_MOST bound (the classic Android sizing trap) let
+        // them balloon to fill nearly the whole remaining screen instead
+        // of just the bar's own height.
+        outerCol.addView(buildBottomNav(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)));
 
         rootFrame.addView(outerCol, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         rootFrame.addView(buildOnboardingOverlay(), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));

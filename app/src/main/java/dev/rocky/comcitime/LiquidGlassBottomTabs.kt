@@ -50,7 +50,11 @@ class LiquidGlassBottomTabs(
 
     init {
         background = UiKit.glassBar()
-        LiquidGlassShader.attach(this, 0f, UiKit.dp(26).toFloat(), UiKit.dp(22).toFloat())
+        // Much smaller than the card-scale values elsewhere in this app:
+        // this whole bar is only ~56dp tall, so a refraction rim anywhere
+        // near card-sized (20dp+) would reach in from both edges far
+        // enough to warp almost the entire bar instead of just its edge.
+        LiquidGlassShader.attach(this, 0f, UiKit.dp(10).toFloat(), UiKit.dp(8).toFloat())
 
         val padV = UiKit.dp(10)
         val padH = UiKit.dp(8)
