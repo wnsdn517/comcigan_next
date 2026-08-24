@@ -65,7 +65,7 @@ public class UiKit {
 
         GradientDrawable sheen = new GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0x33FFFFFF, 0x00FFFFFF});
+                new int[]{0x66FFFFFF, 0x00FFFFFF});
         sheen.setCornerRadius(dpf(radiusDp));
 
         return new LayerDrawable(new Drawable[]{base, sheen});
@@ -140,11 +140,11 @@ public class UiKit {
     // clamps it to a real capsule internally); cards use a smaller fixed
     // radius matching CARD_RADIUS_DP instead.
     private static void attachGlassRefraction(View v) {
-        LiquidGlassShader.attach(v, dpf(PILL_RADIUS_DP), dpf(10f), dpf(8f));
+        LiquidGlassShader.attach(v, dpf(PILL_RADIUS_DP), dpf(18f), dpf(16f));
     }
 
     public static void attachCardGlassRefraction(View v) {
-        LiquidGlassShader.attach(v, dpf(CARD_RADIUS_DP), dpf(14f), dpf(10f));
+        LiquidGlassShader.attach(v, dpf(CARD_RADIUS_DP), dpf(26f), dpf(22f));
     }
 
     public static void styleInput(EditText e) {
