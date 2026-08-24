@@ -764,6 +764,10 @@ public class MappingCollector {
         posY = 0;
         posVarX = 0.01;
         posVarY = 0.01;
+        initParticles(); // otherwise the particle filter's own average
+        // overwrites posX/posY right back to their pre-reset values on the
+        // next update, since the particles themselves weren't moved
+        persistPosition(); // so a later restart doesn't resurrect the old spot
     }
 
     // Rough position uncertainty (meters, one standard deviation) from the
@@ -793,8 +797,14 @@ public class MappingCollector {
         if (running) return;
         running = true;
         stepCount = 0;
-        posX = 0;
-        posY = 0;
+        // Resume from the last known spot instead of snapping back to
+        // (0,0) on every restart -- see Prefs.lastPosX()/persistPosition()
+        // and the class doc above. Ongoing Wi-Fi fingerprint correction
+        // (applyFingerprintCorrection()) still narrows this down further
+        // as scans come in, same as it always has.
+        Prefs prefs = new Prefs(ctx);
+        posX = prefs.lastPosX();
+        posY = prefs.lastPosY();
         initParticles();
         refPressureHpa = 0f;
         historyCount = 0;
@@ -888,6 +898,7 @@ public class MappingCollector {
     public void stop() {
         if (!running) return;
         running = false;
+        persistPosition(); // catches whatever happened since the last step
         handler.removeCallbacks(scanTick);
         try {
             ctx.unregisterReceiver(scanReceiver);
@@ -913,6 +924,25 @@ public class MappingCollector {
         long sid = sessionId;
         double x = posX, y = posY;
         dbExecutor.execute(() -> db.insertWaypoint(sid, floor, label, x, y));
+    }
+
+    // Manual sensor-value debugging: records every raw signal this
+    // collector currently has (not just the automatic per-step motion
+    // sample) at the exact instant the user taps a button for it, e.g.
+    // right as something looks wrong on the live Settings graphs -- an
+    // optional label works the same as addWaypoint()'s.
+    public void snapshotSensors(String label) {
+        if (sessionId < 0) return;
+        long sid = sessionId;
+        long ts = System.currentTimeMillis();
+        float aX = accelX, aY = accelY, aZ = accelZ;
+        float gX = gyroX, gY = gyroY, gZ = gyroZ;
+        float mX = magX, mY = magY, mZ = magZ;
+        float p = pressureHpa, h = headingDeg, pitch = pitchDeg, roll = rollDeg;
+        int rssi = lastTopRssi, floorDelta = getEstimatedFloorDelta();
+        double x = posX, y = posY;
+        dbExecutor.execute(() -> db.insertSensorSnapshot(sid, ts, label,
+                aX, aY, aZ, gX, gY, gZ, mX, mY, mZ, p, h, pitch, roll, rssi, floorDelta, x, y));
     }
 
     // Sibling to addWaypoint(): snapshots the CURRENT live Wi-Fi scan
@@ -1049,5 +1079,16 @@ public class MappingCollector {
         double x = posX, y = posY;
         dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y));
         if (listener != null) listener.onHeadingSteps(h, steps);
+        persistPosition();
+    }
+
+    // Carries the dead-reckoned position across a restart (app reopen, the
+    // service getting killed and restarted -- see class doc on start()) --
+    // written on every step rather than only in stop(), since a killed
+    // process never gets to call stop() at all. SharedPreferences.apply()
+    // is an async, effectively-free write, so doing this every step (at
+    // most a couple times a second while walking) is not worth throttling.
+    private void persistPosition() {
+        new Prefs(ctx).setLastPos((float) posX, (float) posY);
     }
 }

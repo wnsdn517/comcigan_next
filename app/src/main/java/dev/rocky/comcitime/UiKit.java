@@ -138,14 +138,14 @@ public class UiKit {
     // the translucent+sheen material above -- API 33+ only, a no-op below
     // that. A large corner radius here deliberately asks for the fully-
     // rounded capsule shape these buttons already use (LiquidGlassShader
-    // clamps it to a real capsule internally); cards use a smaller fixed
-    // radius matching CARD_RADIUS_DP instead.
+    // clamps it to a real capsule internally). Deliberately NOT applied to
+    // cards: each shader-refracted view needs its own GPU compositing
+    // layer, a real cost not worth paying across the dozens of cards on
+    // screen at once for an effect that barely reads on a large, mostly-
+    // flat surface anyway -- see MainActivity.card()'s comment. The bottom
+    // nav bar gets its own version of this in LiquidGlassBottomBar (Kotlin).
     private static void attachGlassRefraction(View v) {
         LiquidGlassShader.attach(v, dpf(PILL_RADIUS_DP), dpf(18f), dpf(16f));
-    }
-
-    public static void attachCardGlassRefraction(View v) {
-        LiquidGlassShader.attach(v, dpf(CARD_RADIUS_DP), dpf(26f), dpf(22f));
     }
 
     public static void styleInput(EditText e) {

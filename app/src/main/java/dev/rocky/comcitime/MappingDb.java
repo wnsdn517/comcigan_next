@@ -22,7 +22,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 5;
+    private static final int DB_VERSION = 6;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -62,6 +62,19 @@ public class MappingDb extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE place_fingerprints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, " +
                 "floor TEXT, label TEXT, bssid TEXT, rssi INTEGER, freq INTEGER)");
+        // Manually-triggered full raw-sensor snapshots -- see
+        // MappingCollector.snapshotSensors() / MainActivity's "센서값 기록"
+        // button. Separate from motion_samples (which only ever records
+        // heading/pitch/roll/steps automatically on each step): this is
+        // for capturing every raw signal at one specific instant the user
+        // flags, e.g. right as something looks wrong on the live graphs.
+        db.execSQL("CREATE TABLE sensor_snapshots (" +
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, label TEXT, " +
+                "accel_x REAL, accel_y REAL, accel_z REAL, " +
+                "gyro_x REAL, gyro_y REAL, gyro_z REAL, " +
+                "mag_x REAL, mag_y REAL, mag_z REAL, " +
+                "pressure_hpa REAL, heading_deg REAL, pitch_deg REAL, roll_deg REAL, " +
+                "top_rssi INTEGER, floor_delta INTEGER, x REAL, y REAL)");
     }
 
     @Override
@@ -92,6 +105,7 @@ public class MappingDb extends SQLiteOpenHelper {
         db.execSQL("DROP TABLE IF EXISTS waypoints");
         db.execSQL("DROP TABLE IF EXISTS place_fingerprints");
         db.execSQL("DROP TABLE IF EXISTS radio_rtt");
+        db.execSQL("DROP TABLE IF EXISTS sensor_snapshots");
         onCreate(db);
     }
 
@@ -167,8 +181,35 @@ public class MappingDb extends SQLiteOpenHelper {
         getWritableDatabase().insert("radio_rtt", null, cv);
     }
 
+    // See MappingCollector.snapshotSensors() -- one full raw-sensor
+    // snapshot at a manually-flagged instant, distinct from the automatic
+    // per-step motion_samples rows above.
+    public void insertSensorSnapshot(long sessionId, long ts, String label,
+                                      float accelX, float accelY, float accelZ,
+                                      float gyroX, float gyroY, float gyroZ,
+                                      float magX, float magY, float magZ,
+                                      float pressureHpa, float headingDeg, float pitchDeg, float rollDeg,
+                                      int topRssi, int floorDelta, double x, double y) {
+        ContentValues cv = new ContentValues();
+        cv.put("session_id", sessionId);
+        cv.put("ts", ts);
+        cv.put("label", label);
+        cv.put("accel_x", accelX); cv.put("accel_y", accelY); cv.put("accel_z", accelZ);
+        cv.put("gyro_x", gyroX); cv.put("gyro_y", gyroY); cv.put("gyro_z", gyroZ);
+        cv.put("mag_x", magX); cv.put("mag_y", magY); cv.put("mag_z", magZ);
+        cv.put("pressure_hpa", pressureHpa);
+        cv.put("heading_deg", headingDeg);
+        cv.put("pitch_deg", pitchDeg);
+        cv.put("roll_deg", rollDeg);
+        cv.put("top_rssi", topRssi);
+        cv.put("floor_delta", floorDelta);
+        cv.put("x", x);
+        cv.put("y", y);
+        getWritableDatabase().insert("sensor_snapshots", null, cv);
+    }
+
     public static class Counts {
-        public int sessions, scans, samples, waypoints;
+        public int sessions, scans, samples, waypoints, sensorSnapshots;
     }
 
     public Counts counts() {
@@ -178,6 +219,7 @@ public class MappingDb extends SQLiteOpenHelper {
         c.scans = countRows(db, "SELECT COUNT(*) FROM radio_scans");
         c.samples = countRows(db, "SELECT COUNT(*) FROM motion_samples");
         c.waypoints = countRows(db, "SELECT COUNT(*) FROM waypoints");
+        c.sensorSnapshots = countRows(db, "SELECT COUNT(*) FROM sensor_snapshots");
         return c;
     }
 

@@ -143,6 +143,20 @@ public class Prefs {
     public boolean mappingConsentDone() { return sp.getBoolean("mappingConsentDone", false); }
     public void setMappingConsentDone(boolean v) { sp.edit().putBoolean("mappingConsentDone", v).apply(); }
 
+    // Dead-reckoned position carried across MappingCollector restarts (see
+    // MappingCollector.start()/persistPosition()) so re-opening the app or
+    // the service getting killed and restarted mid-day doesn't snap the
+    // estimate back to (0,0) -- it resumes from the last known spot and
+    // lets the usual Wi-Fi fingerprint correction refine it from there,
+    // instead of discarding everything the session had already narrowed
+    // down. A manual "현위치 재설정" still zeroes this explicitly via
+    // MappingCollector.resetOrigin().
+    public float lastPosX() { return sp.getFloat("mapping_last_pos_x", 0f); }
+    public float lastPosY() { return sp.getFloat("mapping_last_pos_y", 0f); }
+    public void setLastPos(float x, float y) {
+        sp.edit().putFloat("mapping_last_pos_x", x).putFloat("mapping_last_pos_y", y).apply();
+    }
+
 
     // ---------- NEIS (optional meal info) ----------
     public String neisApiKey() { return sp.getString("neisKey", ""); }

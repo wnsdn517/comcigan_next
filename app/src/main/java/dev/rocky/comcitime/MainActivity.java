@@ -252,11 +252,9 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout buildBottomNav() {
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.HORIZONTAL);
-        wrap.setBackground(UiKit.glassBar());
-        wrap.setPadding(dp(8), dp(10), dp(8), dp(10));
-        UiKit.attachCardGlassRefraction(wrap);
+        // Kotlin: sets up its own orientation/background/padding/shader --
+        // see LiquidGlassBottomBar's class doc.
+        LinearLayout wrap = new LiquidGlassBottomBar(this);
 
         tabButtons = new Button[TAB_NAMES.length];
         for (int i = 0; i < TAB_NAMES.length; i++) {
@@ -2051,6 +2049,23 @@ public class MainActivity extends Activity {
             glp.topMargin = dp(6);
             rawCard.addView(gv, glp);
         }
+        Button snapshotBtn = new Button(this);
+        snapshotBtn.setText("지금 센서값 기록 (디버그)");
+        snapshotBtn.setTextSize(12);
+        UiKit.styleSecondaryButton(snapshotBtn);
+        LinearLayout.LayoutParams snapshotLp = matchWrap();
+        snapshotLp.topMargin = dp(8);
+        snapshotBtn.setOnClickListener(v -> {
+            MappingCollector running = MappingService.getRunningCollector();
+            if (running == null) {
+                Toast.makeText(this, "아직 백그라운드 수집이 시작되지 않았어요.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            running.snapshotSensors(new SimpleDateFormat("HH:mm:ss", Locale.KOREA).format(new java.util.Date()));
+            Toast.makeText(this, "센서값을 기록했어요.", Toast.LENGTH_SHORT).show();
+            refreshMappingStatus();
+        });
+        rawCard.addView(snapshotBtn, snapshotLp);
         section.addView(rawCard, cardLp());
 
         LinearLayout gyroYawCard = card();
@@ -2298,7 +2313,8 @@ public class MainActivity extends Activity {
         int fingerprints = mappingDb.fingerprintCount();
         int places = mappingDb.placeCount();
         mappingCountsText.setText("누적: 세션 " + c.sessions + "개 · 이동 기록 " + c.samples + "개 · Wi-Fi 스캔 " + c.scans
-                + "개 · 지문(위치별 스캔) " + fingerprints + "개 · 이름표 " + c.waypoints + "개 · 장소 " + places + "개");
+                + "개 · 지문(위치별 스캔) " + fingerprints + "개 · 이름표 " + c.waypoints + "개 · 장소 " + places
+                + "개 · 센서값 기록 " + c.sensorSnapshots + "개");
         updateMappingLiveViews();
         refreshMappingPathView();
     }
@@ -2312,10 +2328,12 @@ public class MainActivity extends Activity {
         MappingCollector running = MappingService.getRunningCollector();
         if (running == null) {
             mappingPathView.setPath(new ArrayList<>(), 0, 0);
+            mappingPathView.setFloorDelta(0);
             return;
         }
         List<double[]> path = mappingDb.recentPath(300);
         mappingPathView.setPath(path, running.getPosX(), running.getPosY());
+        mappingPathView.setFloorDelta(running.getEstimatedFloorDelta());
     }
 
     // Pulls the current heading/pitch/roll/step/position readout, 3D
@@ -2682,7 +2700,13 @@ public class MainActivity extends Activity {
         c.setOrientation(LinearLayout.VERTICAL);
         c.setBackground(UiKit.card());
         c.setPadding(dp(14), dp(14), dp(14), dp(14));
-        UiKit.attachCardGlassRefraction(c);
+        // Real shader refraction is deliberately NOT applied here -- with
+        // dozens of cards on screen at once (settings sections, weekly
+        // schedule cards) each would need its own RenderEffect compositing
+        // layer, which is a real GPU cost for a barely-visible effect on a
+        // large, mostly-flat surface. It's reserved for small, individually
+        // meaningful controls (buttons/toggles -- see UiKit.stylePrimaryButton/
+        // styleSecondaryButton -- and the bottom nav bar) where it actually reads.
         return c;
     }
 
