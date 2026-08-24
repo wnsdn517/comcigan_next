@@ -120,6 +120,7 @@ public class UiKit {
         b.setPadding(dp(20), dp(12), dp(20), dp(12));
         b.setElevation(0);
         b.setStateListAnimator(null);
+        attachGlassRefraction(b);
     }
 
     public static void styleSecondaryButton(Button b) {
@@ -129,6 +130,21 @@ public class UiKit {
         b.setPadding(dp(20), dp(12), dp(20), dp(12));
         b.setElevation(0);
         b.setStateListAnimator(null);
+        attachGlassRefraction(b);
+    }
+
+    // Real GPU liquid-glass refraction (see LiquidGlassShader) on top of
+    // the translucent+sheen material above -- API 33+ only, a no-op below
+    // that. A large corner radius here deliberately asks for the fully-
+    // rounded capsule shape these buttons already use (LiquidGlassShader
+    // clamps it to a real capsule internally); cards use a smaller fixed
+    // radius matching CARD_RADIUS_DP instead.
+    private static void attachGlassRefraction(View v) {
+        LiquidGlassShader.attach(v, dpf(PILL_RADIUS_DP), dpf(10f), dpf(8f));
+    }
+
+    public static void attachCardGlassRefraction(View v) {
+        LiquidGlassShader.attach(v, dpf(CARD_RADIUS_DP), dpf(14f), dpf(10f));
     }
 
     public static void styleInput(EditText e) {

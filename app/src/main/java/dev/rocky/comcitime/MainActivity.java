@@ -258,6 +258,7 @@ public class MainActivity extends Activity {
         wrap.setOrientation(LinearLayout.HORIZONTAL);
         wrap.setBackground(UiKit.glassBar());
         wrap.setPadding(dp(8), dp(10), dp(8), dp(10));
+        UiKit.attachCardGlassRefraction(wrap);
 
         tabButtons = new Button[TAB_NAMES.length];
         for (int i = 0; i < TAB_NAMES.length; i++) {
@@ -2320,6 +2321,7 @@ public class MainActivity extends Activity {
         c.setOrientation(LinearLayout.VERTICAL);
         c.setBackground(UiKit.card());
         c.setPadding(dp(14), dp(14), dp(14), dp(14));
+        UiKit.attachCardGlassRefraction(c);
         return c;
     }
 
