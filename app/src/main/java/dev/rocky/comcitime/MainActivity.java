@@ -1,7 +1,7 @@
 package dev.rocky.comcitime;
 
 import android.Manifest;
-import android.app.Activity;
+import androidx.activity.ComponentActivity;
 import android.app.Dialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -44,7 +44,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-public class MainActivity extends Activity {
+public class MainActivity extends ComponentActivity {
 
     private Prefs prefs;
 
@@ -129,13 +129,11 @@ public class MainActivity extends Activity {
             container.addView(p, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
         outerCol.addView(container, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        // Explicit fixed height, not WRAP_CONTENT: LiquidGlassBottomTabs'
-        // indicator/tabRow children are MATCH_PARENT height, and a
-        // WRAP_CONTENT parent measuring MATCH_PARENT children against an
-        // unresolved AT_MOST bound (the classic Android sizing trap) let
-        // them balloon to fill nearly the whole remaining screen instead
-        // of just the bar's own height.
-        outerCol.addView(buildBottomNav(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)));
+        // Explicit fixed height matching LiquidGlassTabBar's own
+        // BoxWithConstraints(...).height(64.dp) -- not WRAP_CONTENT (a
+        // previous View-based version of this bar hit the classic Android
+        // wrap_content-parent/match_parent-child sizing trap here).
+        outerCol.addView(buildBottomNav(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
 
         rootFrame.addView(outerCol, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         rootFrame.addView(buildOnboardingOverlay(), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -256,22 +254,24 @@ public class MainActivity extends Activity {
         mappingTickHandler.removeCallbacksAndMessages(null);
     }
 
-    // Kotlin: a single sliding glass-pill indicator behind whichever tab is
-    // selected, rather than each tab drawing its own static highlight --
-    // see LiquidGlassBottomTabs's class doc. Owns all three tabs' visual
-    // state itself; showPage() below only calls setActiveTab().
-    private LiquidGlassBottomTabs bottomTabs;
+    // A Compose island (LiquidGlassTabBar.kt) hosting the real
+    // Kyant0/AndroidLiquidGlass engine, not a hand-rolled View-based
+    // approximation -- see LiquidGlassTabBarController's class doc.
+    // showPage() below only calls setSelectedIndex(); tapping a tab
+    // updates this the same way from the Compose side.
+    private LiquidGlassTabBarController bottomTabsController;
 
     private View buildBottomNav() {
-        bottomTabs = new LiquidGlassBottomTabs(this, TAB_NAMES, TAB_ICONS, this::showPage);
-        return bottomTabs;
+        androidx.compose.ui.platform.ComposeView composeView = new androidx.compose.ui.platform.ComposeView(this);
+        bottomTabsController = new LiquidGlassTabBarController(composeView, TAB_NAMES, TAB_ICONS, 0, this::showPage);
+        return composeView;
     }
 
     private void showPage(int index) {
         for (int i = 0; i < pages.length; i++) {
             pages[i].setVisibility(i == index ? View.VISIBLE : View.GONE);
         }
-        bottomTabs.setActiveTab(index, true);
+        bottomTabsController.setSelectedIndex(index);
         nowPanelHandler.removeCallbacksAndMessages(null);
         mappingTickHandler.removeCallbacksAndMessages(null);
         if (index == 0) { loadAllWeeks(); tickNowPanel(); }
