@@ -115,9 +115,9 @@ public class UiKit {
     public static void stylePrimaryButton(Button b) {
         b.setBackground(primaryButtonBg());
         b.setTextColor(ACCENT_TEXT);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         b.setAllCaps(false);
-        b.setPadding(dp(20), dp(12), dp(20), dp(12));
+        b.setPadding(dp(24), dp(14), dp(24), dp(14));
         b.setElevation(0);
         b.setStateListAnimator(null);
         attachGlassRefraction(b);
@@ -126,8 +126,9 @@ public class UiKit {
     public static void styleSecondaryButton(Button b) {
         b.setBackground(secondaryButtonBg());
         b.setTextColor(TEXT_PRIMARY);
+        b.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         b.setAllCaps(false);
-        b.setPadding(dp(20), dp(12), dp(20), dp(12));
+        b.setPadding(dp(24), dp(14), dp(24), dp(14));
         b.setElevation(0);
         b.setStateListAnimator(null);
         attachGlassRefraction(b);
@@ -151,24 +152,29 @@ public class UiKit {
         e.setBackground(inputBg());
         e.setTextColor(TEXT_PRIMARY);
         e.setHintTextColor(TEXT_SECONDARY);
-        e.setPadding(dp(14), dp(10), dp(14), dp(10));
+        e.setPadding(dp(16), dp(14), dp(16), dp(14));
+        e.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
     }
 
     public static void styleEyebrow(TextView t) {
         t.setTextColor(ACCENT);
-        t.setTextSize(12);
-        t.setTypeface(Typeface.DEFAULT_BOLD);
-        t.setLetterSpacing(0.06f);
+        t.setTextSize(13);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setLetterSpacing(0.08f);
+        t.setAllCaps(true);
     }
 
     public static void styleBody(TextView t) {
         t.setTextColor(TEXT_PRIMARY);
-        t.setTextSize(15);
+        t.setTextSize(16);
+        t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        t.setLineSpacing(0, 1.2f);
     }
 
     public static void styleCaption(TextView t) {
         t.setTextColor(TEXT_SECONDARY);
-        t.setTextSize(12);
+        t.setTextSize(13);
+        t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
     }
 
     public static int darken(int color, float factor) {
@@ -255,6 +261,18 @@ public class UiKit {
             }
             return false; // don't consume -- let the real click listener still fire
         });
+    }
+
+    // Physically-inspired damped-sine spring, used where a call site wants
+    // a stronger, longer-settling bounce than OvershootInterpolator's fixed
+    // overshoot-then-settle curve.
+    public static class SpringInterpolator implements android.view.animation.Interpolator {
+        private final double factor;
+        public SpringInterpolator(double factor) { this.factor = factor; }
+        @Override
+        public float getInterpolation(float input) {
+            return (float) (Math.pow(2, -10 * input) * Math.sin((input - factor / 4) * (2 * Math.PI) / factor) + 1);
+        }
     }
 
     public static void popIn(View v) {

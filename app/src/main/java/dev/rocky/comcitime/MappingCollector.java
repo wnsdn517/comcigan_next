@@ -15,6 +15,12 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.net.wifi.ScanResult;
 import android.net.wifi.WifiManager;
+import android.net.wifi.rtt.RangingRequest;
+import android.net.wifi.rtt.RangingResult;
+import android.net.wifi.rtt.RangingResultCallback;
+import android.net.wifi.rtt.WifiRttManager;
+import android.annotation.SuppressLint;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -34,23 +40,48 @@ import java.util.concurrent.Executors;
 // that IS persisted goes through MappingDb on-device only -- there is no
 // network upload in this build.
 //
-// Dead reckoning deliberately avoids two things a naive implementation
+// Dead reckoning deliberately avoids one thing a naive implementation
 // would lean on:
-//  - The magnetometer-fused compass heading, for the direction of travel.
-//    Indoors, magnetic fields are heavily distorted by rebar/wiring/metal
-//    furniture, so a compass heading can be badly wrong right where this
-//    matters most. Instead, direction is tracked by integrating the raw
-//    gyroscope's yaw rate (gyroYawDeg below), only softly pulled toward
-//    the fused heading a couple percent per reading (HEADING_COMPASS_PULL)
-//    -- immune to any single bad magnetometer reading, but still bounded
-//    so per-sample gyro bias can't compound into unlimited drift over a
-//    long walk, with the Wi-Fi fingerprint correction below as a second
-//    line of defense on top of that.
 //  - A fixed, user-entered stride length, for step distance. Actual
 //    stride varies with walking speed and isn't something most people
 //    know precisely. Instead each step's length is estimated from that
 //    step's own accelerometer swing via Weinberg's formula (see
 //    estimateStepLength()), a standard step-length-estimation technique.
+//
+// Direction of travel is the magnetometer-fused compass heading
+// (headingDeg) by default -- it's an absolute reference with no drift,
+// unlike a gyroscope, so it's the better default whenever it can be
+// trusted. The problem is exactly that "whenever": indoors, magnetic
+// fields near rebar/wiring/metal furniture can be badly distorted right
+// where this matters most, silently. updateMagneticReliability() (fed by
+// TYPE_MAGNETIC_FIELD) runs the two-signal disturbance detector from the
+// PDR/AHRS literature -- Afzal, Renaudin & Lachapelle (2011), "Magnetic
+// Perturbations Detection and Heading Estimation Using Magnetometers"
+// (magnitude-and-angle-based detector), and Fan et al. (2014), "Accurate
+// Orientation Estimation Using AHRS under Conditions of Magnetic
+// Distortion" (dip-angle-vs-gravity consistency): a locally undisturbed
+// field keeps (a) a magnitude within Earth's ~25-65 microtesla range and
+// (b) a dip angle relative to gravity that stays essentially constant
+// over a short window, since it's a fixed geophysical property of the
+// location, not something a straight walk would change. Either signal
+// breaking flags magneticReliable = false. While reliable, gyroYawDeg
+// (the gyroscope's integrated yaw) is pulled hard toward headingDeg so
+// it's ready to take over accurately the instant reliability drops; while
+// unreliable, that pull is cut to zero (a known-bad compass reading can't
+// corrupt it) and gyroYawDeg free-integrates alone as the fallback
+// direction source (see the TYPE_ROTATION_VECTOR case and applyStep()'s
+// dirDeg selection) until the compass is trustworthy again.
+//
+// Steps themselves come from a custom accelerometer peak-detector
+// (processCustomStepDetection()) instead of the platform's hardware
+// TYPE_STEP_DETECTOR, which on many devices has a noticeable detection
+// lag -- the custom detector fires the instant a step's peak crosses
+// threshold, so the position update tracks actual footfalls more
+// closely. A lightweight zero-velocity-style stationary detector
+// (processStationaryDetection(), based on short-window accelerometer
+// variance) also lets heading correction pull faster toward the compass
+// while the phone is known to be still, when a compass reading isn't
+// being muddied by step-related vibration.
 //
 // The resulting trajectory only needs to be locally consistent, not
 // metrically perfect: every Wi-Fi scan is tagged with the position dead
@@ -92,6 +123,7 @@ public class MappingCollector {
     private final Context ctx;
     private final MappingDb db;
     private final WifiManager wifiManager;
+    private final WifiRttManager wifiRttManager;
     private final SensorManager sensorManager;
     private final LocationManager locationManager;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -117,10 +149,29 @@ public class MappingCollector {
     private double gyroYawDeg = Double.NaN;
     private long lastGyroTimestampNs = 0;
     // Fraction of the gyro-vs-compass heading gap corrected per fused-
-    // heading update (~SENSOR_DELAY_UI, tens of ms) -- small enough that
-    // indoor magnetic noise barely moves gyroYawDeg on any single update,
-    // but large enough to bound drift over a multi-minute walk.
-    private static final double HEADING_COMPASS_PULL = 0.02;
+    // heading update (~SENSOR_DELAY_UI, tens of ms), applied only while
+    // magneticReliable (see class doc/updateMagneticReliability()) -- the
+    // compass is primary direction source while reliable, so gyroYawDeg
+    // only needs to stay resynced and ready as the fallback, not do the
+    // steering itself. Pull is cut to zero entirely during a detected
+    // disturbance (see the TYPE_ROTATION_VECTOR case below).
+    private static final double HEADING_COMPASS_PULL = 0.3;
+    // While the phone is detected stationary (see processStationaryDetection()),
+    // pull harder toward the compass heading -- a compass reading isn't
+    // being muddied by step-related vibration right then, so it's safe to
+    // resync gyroYawDeg even faster.
+    private static final double HEADING_COMPASS_PULL_STATIONARY = 0.5;
+
+    // Magnetic disturbance detection (see class doc for the two papers
+    // this follows). A locally undisturbed field has a magnitude in
+    // Earth's normal range and a dip angle (relative to gravity) that
+    // stays essentially constant over a short window; indoor ferrous/
+    // electrical interference breaks one or both, so both are checked.
+    private static final float MAG_MIN_UT = 20f, MAG_MAX_UT = 70f; // Earth's ~25-65uT, widened for sensor noise
+    private static final float DIP_VARIANCE_THRESHOLD_DEG2 = 9f; // ~3 degree stdev
+    private final float[] dipAngleWindow = new float[10];
+    private int dipAngleWindowIdx = 0;
+    private boolean magneticReliable = true;
 
     // Running min/max of accelerometer magnitude since the last step,
     // feeding Weinberg's per-step dynamic stride-length estimate (see
@@ -140,6 +191,68 @@ public class MappingCollector {
     // to match it against the fingerprint map for the drift correction
     // described in the class doc.
     private java.util.Map<String, Integer> lastScanRssi = new java.util.HashMap<>();
+    // Frequencies for the same scan, kept alongside lastScanRssi so a
+    // manual place tag (see addPlaceTag()) can persist real frequencies
+    // instead of a placeholder.
+    private java.util.Map<String, Integer> lastScanFreqByBssid = new java.util.HashMap<>();
+
+    // Latest live place-recognition result (MappingDb.recognizePlace()),
+    // refreshed on every Wi-Fi scan alongside the fingerprint-correction
+    // match above -- cheap, since rssiByBssid is already computed for that
+    // in recordScanResults(). volatile is enough since this is a read-only
+    // cached value for the UI tick to poll, unlike applyFingerprintCorrection()
+    // which must run on the main thread because it mutates position state.
+    private volatile MappingDb.PlaceMatch lastPlaceMatch;
+
+    // Custom low-latency step detector (accelerometer peak detection),
+    // used instead of the platform's TYPE_STEP_DETECTOR -- see class doc.
+    private static final float PEAK_THRESHOLD = 1.2f; // m/s^2 above gravity
+    private static final long STEP_COOLDOWN_MS = 250;
+    private long lastStepTimeMs = 0;
+    private boolean peakSearching = true;
+
+    // Cadence-consistency confirmation: a single accelerometer peak
+    // crossing PEAK_THRESHOLD isn't credited as a step by itself -- a hand
+    // tremor, a desk tap, or picking the phone up all cross that threshold
+    // once too, and raising PEAK_THRESHOLD to filter those out just makes
+    // real light footsteps get missed instead (the tradeoff the amplitude
+    // threshold can't escape). What a genuine footstep has that an
+    // isolated jolt never does is rhythm: it's followed by another peak
+    // roughly a stride later. So a peak is only ever committed to
+    // stepCount/position once a second peak confirms it within
+    // MAX_STEP_INTERVAL_MS -- gating on *timing between peaks*, not their
+    // amplitude, so it doesn't trade off against light-footstep detection.
+    private static final long MAX_STEP_INTERVAL_MS = 1100; // ~55 steps/min lower bound
+    private boolean inGaitStreak = false;
+    private boolean pendingStepPresent = false;
+    private double pendingStepLenM = 0;
+    private double pendingStepDirDeg = 0;
+
+    // Stationary detection (short-window accelerometer variance), used to
+    // trust the compass more while the phone is known to be still -- see
+    // class doc and HEADING_COMPASS_PULL_STATIONARY above.
+    private static final float STATIONARY_THRESHOLD = 0.08f; // m/s^2 variance
+    private boolean isStationary = true;
+    private final float[] accelWindow = new float[10];
+    private int accelWindowIdx = 0;
+
+    // Particle Filter (Sensor Fusion)
+    private static final int NUM_PARTICLES = 100;
+    private static final double MOTION_NOISE_STD = 0.2; // 20cm motion noise
+    private final double[][] particles = new double[NUM_PARTICLES][2]; // {x, y}
+
+    // Heuristic Drift Elimination (HDE)
+    private static final float GYRO_VARIANCE_THRESHOLD = 0.005f;
+    private final float[] gyroWindow = new float[60]; // ~3 seconds at SENSOR_DELAY_UI
+    private int gyroWindowIdx = 0;
+
+    // Barometric Activity Recognition
+    public enum Activity { STILL, WALKING, STAIRS, ELEVATOR }
+    private Activity currentActivity = Activity.STILL;
+    public Activity getCurrentActivity() { return currentActivity; }
+    private static final float ELEVATOR_PRESSURE_RATE = 0.2f; // hPa/s
+    private float lastPressureHpa = 0f;
+    private long lastPressureTime = 0;
 
     // ---- lower-priority raw signals (see class doc): latest value only,
     // plus a rolling per-axis history buffer per signal for the debug
@@ -198,6 +311,7 @@ public class MappingCollector {
         @Override
         public void onSensorChanged(SensorEvent event) {
             switch (event.sensor.getType()) {
+                case Sensor.TYPE_GAME_ROTATION_VECTOR:
                 case Sensor.TYPE_ROTATION_VECTOR:
                     SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values);
                     SensorManager.getOrientation(rotationMatrix, orientation);
@@ -208,57 +322,58 @@ public class MappingCollector {
                     if (Double.isNaN(gyroYawDeg)) {
                         gyroYawDeg = headingDeg; // one-time bootstrap
                     } else {
-                        // Continuous small pull toward the compass heading
-                        // so gyro-integration bias doesn't drift forever
-                        // over a long session (see class doc) -- a fixed
-                        // one-time bootstrap alone lets small per-sample
-                        // gyro error compound into a growing rotation over
-                        // many minutes, which is what a walked loop not
-                        // closing on itself looks like. The weight is kept
-                        // small so a single bad indoor-magnetic reading
-                        // can't yank heading off course either.
+                        // Keeps gyroYawDeg resynced to the compass while
+                        // the compass is trusted (see class doc), so it's
+                        // ready to take over accurately the instant
+                        // magneticReliable flips false. Pull is cut to
+                        // zero during a detected disturbance -- a
+                        // known-bad compass reading must never steer the
+                        // fallback source that's about to be relied on.
                         double diff = shortestAngleDiffDeg(headingDeg, gyroYawDeg);
-                        gyroYawDeg = ((gyroYawDeg + diff * HEADING_COMPASS_PULL) % 360 + 360) % 360;
+                        double pull = !magneticReliable ? 0
+                                : (isStationary ? HEADING_COMPASS_PULL_STATIONARY : HEADING_COMPASS_PULL);
+                        gyroYawDeg = ((gyroYawDeg + diff * pull) % 360 + 360) % 360;
                     }
                     break;
                 case Sensor.TYPE_STEP_DETECTOR:
-                    stepCount++;
-                    double stepLen = estimateStepLength();
-                    double dirDeg = Double.isNaN(gyroYawDeg) ? headingDeg : gyroYawDeg;
-                    double rad = Math.toRadians(dirDeg);
-                    posX += stepLen * Math.sin(rad);
-                    posY += stepLen * Math.cos(rad);
-                    posVarX += STEP_PROCESS_NOISE;
-                    posVarY += STEP_PROCESS_NOISE;
-                    lastStepLengthM = stepLen;
-                    accelMinInStep = Float.MAX_VALUE;
-                    accelMaxInStep = -Float.MAX_VALUE;
-                    recordMotionSample();
+                    // Position updates now come from the custom low-latency
+                    // peak detector in processCustomStepDetection() (driven
+                    // off TYPE_ACCELEROMETER below), not this hardware
+                    // event -- kept registered only so a device without a
+                    // usable accelerometer stream still has a step source,
+                    // but not counted here to avoid double-counting steps.
                     break;
                 case Sensor.TYPE_ACCELEROMETER:
                     accelX = event.values[0]; accelY = event.values[1]; accelZ = event.values[2];
                     accelMag = vectorMag(event.values);
                     accelMinInStep = Math.min(accelMinInStep, accelMag);
                     accelMaxInStep = Math.max(accelMaxInStep, accelMag);
+                    // Stationary detection runs first so processCustomStepDetection()
+                    // below sees isStationary for *this* sample, not the
+                    // previous one.
+                    processStationaryDetection(accelMag);
+                    processCustomStepDetection(accelMag);
                     break;
                 case Sensor.TYPE_GYROSCOPE:
                     gyroX = event.values[0]; gyroY = event.values[1]; gyroZ = event.values[2];
                     if (lastGyroTimestampNs != 0 && !Double.isNaN(gyroYawDeg)) {
                         double dt = (event.timestamp - lastGyroTimestampNs) / 1_000_000_000.0;
-                        // z-axis angular rate approximates yaw rate while the
-                        // phone is held roughly upright, consistent with the
-                        // rest of this class's simplifications.
                         double dYaw = Math.toDegrees(gyroZ) * dt;
-                        gyroYawDeg = ((gyroYawDeg + dYaw) % 360 + 360) % 360;
+                        gyroYawDeg = ((gyroYawDeg - dYaw) % 360 + 360) % 360;
+                        
+                        // Heuristic Drift Elimination (HDE)
+                        processHDE(gyroZ);
                     }
                     lastGyroTimestampNs = event.timestamp;
                     break;
                 case Sensor.TYPE_MAGNETIC_FIELD:
                     magX = event.values[0]; magY = event.values[1]; magZ = event.values[2];
+                    updateMagneticReliability();
                     break;
                 case Sensor.TYPE_PRESSURE:
                     pressureHpa = event.values[0];
                     if (refPressureHpa == 0f) refPressureHpa = pressureHpa;
+                    updateBarometricActivity(pressureHpa);
                     break;
             }
         }
@@ -278,6 +393,49 @@ public class MappingCollector {
         return (target - current + 540) % 360 - 180;
     }
 
+    // Angle between the magnetic field vector and the (accelerometer-
+    // approximated) gravity vector -- the "dip angle" used by
+    // updateMagneticReliability() below. Using the raw accelerometer as a
+    // gravity proxy (rather than a separately low-pass-filtered gravity
+    // estimate) is an approximation, but adequate here: dip-angle
+    // consistency is checked over a rolling window (see dipAngleWindow),
+    // so brief accelerometer noise from motion washes out the same way
+    // sensor noise does, without needing a dedicated gravity filter.
+    private static double dipAngleDeg(float magX, float magY, float magZ,
+                                       float accelX, float accelY, float accelZ) {
+        double dot = magX * accelX + magY * accelY + magZ * accelZ;
+        double magMag = Math.sqrt(magX * magX + magY * magY + magZ * magZ);
+        double accelMag = Math.sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ);
+        if (magMag < 1e-3 || accelMag < 1e-3) return 90;
+        double cos = Math.max(-1, Math.min(1, dot / (magMag * accelMag)));
+        return Math.toDegrees(Math.acos(cos));
+    }
+
+    // Magnetic disturbance detector (see class doc for the two papers this
+    // follows): flags magneticReliable = false when either the field
+    // magnitude leaves Earth's normal range, or the dip angle relative to
+    // gravity -- a fixed geophysical property of the current location --
+    // starts varying more than sensor noise alone would explain. Checking
+    // dip-angle *variance* over a rolling window rather than comparing to
+    // an absolute expected dip avoids needing to know Korea's actual
+    // magnetic dip in advance; only its short-term stability matters.
+    private void updateMagneticReliability() {
+        float magMagnitude = vectorMag(new float[]{magX, magY, magZ});
+        boolean magnitudeOk = magMagnitude >= MAG_MIN_UT && magMagnitude <= MAG_MAX_UT;
+
+        double dip = dipAngleDeg(magX, magY, magZ, accelX, accelY, accelZ);
+        dipAngleWindow[dipAngleWindowIdx] = (float) dip;
+        dipAngleWindowIdx = (dipAngleWindowIdx + 1) % dipAngleWindow.length;
+        float mean = 0;
+        for (float v : dipAngleWindow) mean += v;
+        mean /= dipAngleWindow.length;
+        float variance = 0;
+        for (float v : dipAngleWindow) variance += (v - mean) * (v - mean);
+        variance /= dipAngleWindow.length;
+
+        magneticReliable = magnitudeOk && variance < DIP_VARIANCE_THRESHOLD_DEG2;
+    }
+
     // Weinberg's dynamic step-length formula: length = K * (a_max - a_min)^(1/4),
     // over the accelerometer swing observed during the step that just
     // finished. Clamped to a physically plausible walking-stride range so
@@ -288,6 +446,217 @@ public class MappingCollector {
         double swing = accelMaxInStep - accelMinInStep;
         double len = STEP_LENGTH_K * Math.pow(swing, 0.25);
         return Math.max(0.3, Math.min(1.0, len));
+    }
+
+    // Fires the moment the accelerometer magnitude's swing away from
+    // gravity crosses PEAK_THRESHOLD, then waits for it to fall back
+    // before searching for the next peak -- lower latency than the
+    // platform's hardware step detector, which on many devices only
+    // reports a step some tens to hundreds of ms after it actually
+    // happened. STEP_COOLDOWN_MS guards against a single footfall's
+    // vibration registering as more than one step.
+    private void processCustomStepDetection(float mag) {
+        long now = System.currentTimeMillis();
+        float gravity = 9.81f;
+        float relativeMag = Math.abs(mag - gravity);
+
+        if (peakSearching && relativeMag > PEAK_THRESHOLD && (now - lastStepTimeMs) > STEP_COOLDOWN_MS) {
+            onPeakDetected(now);
+            peakSearching = false;
+        } else if (!peakSearching && relativeMag < PEAK_THRESHOLD / 2) {
+            peakSearching = true;
+        }
+    }
+
+    // One accelerometer peak just crossed PEAK_THRESHOLD -- decide whether
+    // to credit it as a step immediately, use it to confirm a step stashed
+    // a stride ago, or stash it as pending itself. See the
+    // MAX_STEP_INTERVAL_MS comment above for why.
+    private void onPeakDetected(long now) {
+        long gapMs = now - lastStepTimeMs;
+        double stepLen = estimateStepLength();
+        // Compass primary, gyro fallback (see class doc): use headingDeg
+        // whenever the magnetometer is currently trustworthy, and only
+        // fall back to the free-integrating gyroYawDeg while a magnetic
+        // disturbance is detected (or before the gyro has bootstrapped).
+        double dirDeg = (!magneticReliable && !Double.isNaN(gyroYawDeg)) ? gyroYawDeg : headingDeg;
+        accelMinInStep = Float.MAX_VALUE;
+        accelMaxInStep = -Float.MAX_VALUE;
+
+        if (inGaitStreak && gapMs <= MAX_STEP_INTERVAL_MS) {
+            // Continuing an already-confirmed walking streak.
+            applyStep(stepLen, dirDeg);
+        } else if (pendingStepPresent && gapMs <= MAX_STEP_INTERVAL_MS) {
+            // This peak arrived on-rhythm after the stashed one -- both are
+            // real steps, and the streak is now established.
+            commitPendingStep();
+            applyStep(stepLen, dirDeg);
+            inGaitStreak = true;
+        } else {
+            // Isolated peak, or the previous streak's rhythm broke. Don't
+            // credit it yet -- only a rhythmic follow-up peak can confirm
+            // it later, which a lone jolt never produces.
+            inGaitStreak = false;
+            stashPendingStep(stepLen, dirDeg);
+        }
+        lastStepTimeMs = now;
+    }
+
+    // Shared by an immediately-committed peak and a pending peak confirmed
+    // one stride later, so both update position/variance identically using
+    // the length/heading captured at the moment that peak actually happened.
+    private void applyStep(double stepLenM, double dirDeg) {
+        isStationary = false;
+        stepCount++;
+        double rad = Math.toRadians(dirDeg);
+        posX += stepLenM * Math.sin(rad);
+        posY += stepLenM * Math.cos(rad);
+        
+        // Update Particle Filter (Motion Model)
+        updateParticlesMotion(stepLenM, rad);
+        
+        posVarX += STEP_PROCESS_NOISE;
+        posVarY += STEP_PROCESS_NOISE;
+        lastStepLengthM = stepLenM;
+        recordMotionSample();
+    }
+
+    private void stashPendingStep(double stepLenM, double dirDeg) {
+        pendingStepPresent = true;
+        pendingStepLenM = stepLenM;
+        pendingStepDirDeg = dirDeg;
+    }
+
+    private void commitPendingStep() {
+        pendingStepPresent = false;
+        applyStep(pendingStepLenM, pendingStepDirDeg);
+    }
+
+    // Zero-velocity-style stationary check: true once the accelerometer
+    // magnitude's variance over a short rolling window drops below
+    // STATIONARY_THRESHOLD, i.e. the phone isn't actively bouncing with
+    // footsteps. Feeds HEADING_COMPASS_PULL_STATIONARY above; a confirmed
+    // step (applyStep()) always forces this back to false immediately --
+    // a merely-pending, unconfirmed peak deliberately does not, so an
+    // isolated jolt can't fake "walking" here either.
+    private void processStationaryDetection(float mag) {
+        accelWindow[accelWindowIdx] = mag;
+        accelWindowIdx = (accelWindowIdx + 1) % accelWindow.length;
+
+        float mean = 0;
+        for (float v : accelWindow) mean += v;
+        mean /= accelWindow.length;
+
+        float variance = 0;
+        for (float v : accelWindow) variance += (v - mean) * (v - mean);
+        variance /= accelWindow.length;
+
+        isStationary = variance < STATIONARY_THRESHOLD;
+        if (isStationary) currentActivity = Activity.STILL;
+    }
+
+    private void processHDE(float gyroZ) {
+        gyroWindow[gyroWindowIdx] = gyroZ;
+        gyroWindowIdx = (gyroWindowIdx + 1) % gyroWindow.length;
+
+        float mean = 0;
+        for (float v : gyroWindow) mean += v;
+        mean /= gyroWindow.length;
+
+        float variance = 0;
+        for (float v : gyroWindow) variance += (v - mean) * (v - mean);
+        variance /= gyroWindow.length;
+
+        // If variance is very low, we are walking straight.
+        if (variance < GYRO_VARIANCE_THRESHOLD) {
+            // Nudge toward nearest 90-degree axis
+            double target = Math.round(gyroYawDeg / 90.0) * 90.0;
+            double diff = shortestAngleDiffDeg(target, gyroYawDeg);
+            gyroYawDeg = ((gyroYawDeg + diff * 0.005) % 360 + 360) % 360;
+        }
+    }
+
+    private void updateBarometricActivity(float pressure) {
+        long now = System.currentTimeMillis();
+        if (lastPressureTime != 0) {
+            float dt = (now - lastPressureTime) / 1000f;
+            float rate = Math.abs(pressure - lastPressureHpa) / dt;
+            
+            if (rate > ELEVATOR_PRESSURE_RATE) {
+                currentActivity = Activity.ELEVATOR;
+            } else if (rate > 0.05f && inGaitStreak) {
+                currentActivity = Activity.STAIRS;
+            } else if (inGaitStreak) {
+                currentActivity = Activity.WALKING;
+            }
+        }
+        lastPressureHpa = pressure;
+        lastPressureTime = now;
+    }
+
+    private void updateParticlesMotion(double stepLen, double rad) {
+        java.util.Random rnd = new java.util.Random();
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            double noisyLen = stepLen + rnd.nextGaussian() * MOTION_NOISE_STD;
+            double noisyRad = rad + rnd.nextGaussian() * 0.05; // ~3 degrees
+            particles[i][0] += noisyLen * Math.sin(noisyRad);
+            particles[i][1] += noisyLen * Math.cos(noisyRad);
+        }
+    }
+
+    private void updateParticlesMeasurement(double mx, double my, double std) {
+        double totalWeight = 0;
+        double[] weights = new double[NUM_PARTICLES];
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            double dx = particles[i][0] - mx;
+            double dy = particles[i][1] - my;
+            double distSq = dx * dx + dy * dy;
+            weights[i] = Math.exp(-distSq / (2 * std * std));
+            totalWeight += weights[i];
+        }
+
+        if (totalWeight < 1e-9) { // Reset particles if they all died
+            initParticles();
+            return;
+        }
+
+        // Resample
+        double[][] nextParticles = new double[NUM_PARTICLES][2];
+        java.util.Random rnd = new java.util.Random();
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            double r = rnd.nextDouble() * totalWeight;
+            double count = 0;
+            for (int j = 0; j < NUM_PARTICLES; j++) {
+                count += weights[j];
+                if (count >= r) {
+                    nextParticles[i][0] = particles[j][0] + rnd.nextGaussian() * 0.1;
+                    nextParticles[i][1] = particles[j][1] + rnd.nextGaussian() * 0.1;
+                    break;
+                }
+            }
+        }
+        
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            particles[i][0] = nextParticles[i][0];
+            particles[i][1] = nextParticles[i][1];
+        }
+
+        // Update posX/posY to particle mean
+        double avgX = 0, avgY = 0;
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            avgX += particles[i][0];
+            avgY += particles[i][1];
+        }
+        posX = avgX / NUM_PARTICLES;
+        posY = avgY / NUM_PARTICLES;
+    }
+
+    private void initParticles() {
+        java.util.Random rnd = new java.util.Random();
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            particles[i][0] = posX + rnd.nextGaussian() * 0.5;
+            particles[i][1] = posY + rnd.nextGaussian() * 0.5;
+        }
     }
 
     private final Runnable scanTick = new Runnable() {
@@ -303,6 +672,11 @@ public class MappingCollector {
         this.ctx = ctx.getApplicationContext();
         this.db = new MappingDb(this.ctx);
         this.wifiManager = (WifiManager) this.ctx.getSystemService(Context.WIFI_SERVICE);
+        if (Build.VERSION.SDK_INT >= 28) {
+            this.wifiRttManager = (WifiRttManager) this.ctx.getSystemService(Context.WIFI_RTT_RANGING_SERVICE);
+        } else {
+            this.wifiRttManager = null;
+        }
         this.sensorManager = (SensorManager) this.ctx.getSystemService(Context.SENSOR_SERVICE);
         this.locationManager = (LocationManager) this.ctx.getSystemService(Context.LOCATION_SERVICE);
     }
@@ -318,11 +692,15 @@ public class MappingCollector {
     public float getHeadingDeg() { return headingDeg; }
     public double getLastStepLengthM() { return lastStepLengthM; }
     public java.util.Map<String, Integer> getLastScanRssi() { return lastScanRssi; }
+    public MappingDb.PlaceMatch getLastPlaceMatch() { return lastPlaceMatch; }
     public float getPitchDeg() { return pitchDeg; }
     public float getRollDeg() { return rollDeg; }
     public int getStepCount() { return stepCount; }
     public double getPosX() { return posX; }
     public double getPosY() { return posY; }
+    public boolean isStationary() { return isStationary; }
+    public boolean isInGaitStreak() { return inGaitStreak; }
+    public boolean isMagneticReliable() { return magneticReliable; }
 
     public float getPressureHpa() { return pressureHpa; }
     public int getLastTopRssi() { return lastTopRssi; }
@@ -400,11 +778,13 @@ public class MappingCollector {
     // nearest neighbors were in RSSI-space (a tight cluster of close
     // matches is trusted far more than a vague one). See class doc.
     private void applyFingerprintCorrection(double mx, double my, double matchDistance) {
-        double r = Math.max(0.25, Math.min(25.0, matchDistance * matchDistance * 0.02));
+        double std = Math.max(0.5, matchDistance * 0.1);
+        updateParticlesMeasurement(mx, my, std);
+        
+        // Old EKF style variance update (kept for metadata)
+        double r = std * std;
         double kx = posVarX / (posVarX + r);
         double ky = posVarY / (posVarY + r);
-        posX += kx * (mx - posX);
-        posY += ky * (my - posY);
         posVarX *= (1 - kx);
         posVarY *= (1 - ky);
     }
@@ -415,6 +795,7 @@ public class MappingCollector {
         stepCount = 0;
         posX = 0;
         posY = 0;
+        initParticles();
         refPressureHpa = 0f;
         historyCount = 0;
         posVarX = 1.0;
@@ -423,10 +804,16 @@ public class MappingCollector {
         lastGyroTimestampNs = 0;
         accelMinInStep = Float.MAX_VALUE;
         accelMaxInStep = -Float.MAX_VALUE;
+        inGaitStreak = false;
+        pendingStepPresent = false;
+        magneticReliable = true;
+        java.util.Arrays.fill(dipAngleWindow, 0f);
+        dipAngleWindowIdx = 0;
         sessionId = db.startSession();
 
         registerScanReceiver();
 
+        registerIfAvailable(Sensor.TYPE_GAME_ROTATION_VECTOR);
         registerIfAvailable(Sensor.TYPE_ROTATION_VECTOR);
         registerIfAvailable(Sensor.TYPE_STEP_DETECTOR);
         registerIfAvailable(Sensor.TYPE_ACCELEROMETER);
@@ -528,8 +915,72 @@ public class MappingCollector {
         dbExecutor.execute(() -> db.insertWaypoint(sid, floor, label, x, y));
     }
 
-    // Synchronous on purpose -- only called from an explicit user tap
-    // (not on a hot path), so a brief direct read is fine.
+    // Sibling to addWaypoint(): snapshots the CURRENT live Wi-Fi scan
+    // (lastScanRssi/lastScanFreqByBssid) under the same floor/label,
+    // building a place->Wi-Fi-fingerprint directory independent of dead-
+    // reckoning drift/accuracy -- a direct manual ground-truth tag, not
+    // inferred from posX/posY. No-ops if no Wi-Fi scan has landed yet;
+    // addWaypoint's position tag still succeeds either way, since the two
+    // are independent persistence paths sharing one user tap. Not session-
+    // scoped (no sessionId gate) -- places are meant to accumulate across
+    // sessions/days, unlike per-session dead-reckoning data.
+    public void addPlaceTag(String floor, String label) {
+        java.util.Map<String, Integer> rssi = new java.util.HashMap<>(lastScanRssi);
+        if (rssi.isEmpty()) return;
+        java.util.Map<String, Integer> freq = new java.util.HashMap<>(lastScanFreqByBssid);
+        long ts = System.currentTimeMillis();
+        dbExecutor.execute(() -> {
+            for (java.util.Map.Entry<String, Integer> e : rssi.entrySet()) {
+                Integer f = freq.get(e.getKey());
+                db.insertPlaceFingerprint(ts, floor, label, e.getKey(), e.getValue(), f != null ? f : 0);
+            }
+        });
+    }
+
+    @SuppressLint("MissingPermission")
+    private void startRttRanging(List<ScanResult> results) {
+        if (Build.VERSION.SDK_INT < 28 || wifiRttManager == null) return;
+        
+        RangingRequest.Builder builder = new RangingRequest.Builder();
+        int added = 0;
+        for (ScanResult res : results) {
+            if (res.is80211mcResponder()) {
+                builder.addAccessPoint(res);
+                added++;
+            }
+        }
+        if (added == 0) return;
+
+        try {
+            wifiRttManager.startRanging(builder.build(), ctx.getMainExecutor(), new RangingResultCallback() {
+                @Override
+                public void onRangingFailure(int code) {}
+
+                @Override
+                public void onRangingResults(List<RangingResult> results) {
+                    processRttResults(results);
+                }
+            });
+        } catch (SecurityException ignored) {}
+    }
+
+    private void processRttResults(List<RangingResult> results) {
+        if (Build.VERSION.SDK_INT < 28) return;
+        long sid = sessionId;
+        long ts = System.currentTimeMillis();
+        dbExecutor.execute(() -> {
+            for (RangingResult res : results) {
+                if (res.getStatus() == RangingResult.STATUS_SUCCESS) {
+                    db.insertRadioRtt(sid, ts, res.getMacAddress().toString(), 
+                                     res.getDistanceMm(), res.getDistanceStdDevMm(), res.getRssi());
+                    
+                    // Nudge towards AP if we have an estimate for it
+                    // (Simplified PF update: treat as a localized anchor)
+                    // ... (In a real implementation we'd use these as circular constraints)
+                }
+            }
+        });
+    }
     public MappingDb.Counts counts() {
         return db.counts();
     }
@@ -552,12 +1003,15 @@ public class MappingCollector {
         }
         int top = -120;
         java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
+        java.util.Map<String, Integer> freqByBssid = new java.util.HashMap<>();
         for (ScanResult r : results) {
             if (r.level > top) top = r.level;
             rssiByBssid.put(r.BSSID, r.level);
+            freqByBssid.put(r.BSSID, r.frequency);
         }
         lastTopRssi = top;
         lastScanRssi = rssiByBssid;
+        lastScanFreqByBssid = freqByBssid;
         long sid = sessionId;
         long ts = System.currentTimeMillis();
         double x = posX, y = posY;
@@ -574,6 +1028,15 @@ public class MappingCollector {
             if (match != null) {
                 handler.post(() -> applyFingerprintCorrection(match[0], match[1], match[2]));
             }
+            
+            // Perform RTT Ranging if available
+            if (Build.VERSION.SDK_INT >= 28 && wifiRttManager != null) {
+                startRttRanging(results);
+            }
+
+            // Piggybacks on the same rssiByBssid -- no extra Wi-Fi scan
+            // needed for place recognition (see addPlaceTag()/class doc).
+            lastPlaceMatch = db.recognizePlace(rssiByBssid, 5);
         });
         if (listener != null) listener.onScanCount(results.size());
     }

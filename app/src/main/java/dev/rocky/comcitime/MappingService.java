@@ -21,11 +21,35 @@ public class MappingService extends Service {
     private static MappingCollector runningCollector;
 
     private MappingCollector collector;
+    private final android.os.Handler checkHandler = new android.os.Handler();
+    private final Runnable checkTask = new Runnable() {
+        @Override
+        public void run() {
+            MappingCollector col = getCollector();
+            if (col != null) {
+                try {
+                    if (shouldCollect(col)) {
+                        if (!col.isRunning()) col.start();
+                        runningCollector = col;
+                    } else if (col.isRunning()) {
+                        col.stop();
+                        runningCollector = null;
+                    }
+                } catch (Exception e) {
+                    // See onStartCommand()'s try/catch for why this can't be
+                    // allowed to crash the service.
+                    android.util.Log.w("MappingService", "collector start/stop failed", e);
+                }
+            }
+            checkHandler.postDelayed(this, 30000); // Check every 30s
+        }
+    };
 
     @Override
     public void onCreate() {
         super.onCreate();
         collector = new MappingCollector(this);
+        checkHandler.post(checkTask);
     }
 
     // Same reasoning as LiveNotifyService: every startForegroundService()
@@ -36,8 +60,14 @@ public class MappingService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         startForeground(NotificationHelper.ID_MAPPING, NotificationHelper.buildMapping(this));
         try {
-            if (!collector.isRunning()) collector.start();
-            runningCollector = collector;
+            MappingCollector col = getCollector();
+            if (shouldCollect(col)) {
+                if (!col.isRunning()) col.start();
+                runningCollector = col;
+            } else if (col.isRunning()) {
+                col.stop();
+                runningCollector = null;
+            }
         } catch (Exception e) {
             // Never let a collection-side failure crash the whole service --
             // that would leave runningCollector null forever (looks to the
@@ -49,6 +79,28 @@ public class MappingService extends Service {
         }
         MappingWatchdogReceiver.schedule(this);
         return START_STICKY;
+    }
+
+    private MappingCollector getCollector() {
+        if (collector == null) collector = new MappingCollector(this);
+        return collector;
+    }
+
+    private boolean shouldCollect(MappingCollector col) {
+        Prefs prefs = new Prefs(this);
+        if (prefs.testMode()) return true;
+
+        float sLat = prefs.schoolLat();
+        float sLon = prefs.schoolLon();
+        if (sLat == 0f || sLon == 0f) return false;
+
+        double lastLat = col.getLastLat();
+        double lastLon = col.getLastLon();
+        if (Double.isNaN(lastLat) || Double.isNaN(lastLon)) return true; // Keep running until we know where we are
+
+        float[] results = new float[1];
+        android.location.Location.distanceBetween(sLat, sLon, lastLat, lastLon, results);
+        return results[0] < 300; // Only collect within 300m of school
     }
 
     @Override
