@@ -22,7 +22,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 5;
+    private static final int DB_VERSION = 6;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);

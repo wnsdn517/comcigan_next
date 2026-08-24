@@ -2,6 +2,7 @@ package dev.rocky.comcitime;
 
 import android.content.Context;
 import android.graphics.RenderEffect;
+import android.graphics.RuntimeShader;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -20,21 +21,25 @@ import android.widget.TextView;
 // blended glow, flat blocks instead of shadows, snappier ease-out motion
 // instead of springy overshoot -- rather than a glossy "modern SaaS" look.
 public class UiKit {
-    // Liquid Glass Palette v2
-    public static final int BG = 0xFF08090C; 
-    public static final int SURFACE = 0x1AFFFFFF; // 10% white
-    public static final int SURFACE_ALT = 0x26FFFFFF; // 15% white
-    public static final int BORDER = 0x33FFFFFF; // 20% white
-    public static final int TEXT_PRIMARY = 0xFFF5F5F7; 
-    public static final int TEXT_SECONDARY = 0xFF9DA3AE;
-    public static final int ACCENT = 0xFF8EACFF; 
-    public static final int ACCENT_TEXT = 0xFF08090C;
-    public static final int CHANGED = 0x4DFF6B5E;
+    // Liquid Glass Palette v12 (True Kyant "Ultimate" Style)
+    public static final int BG = 0xFF000000; 
+    public static final int SURFACE = 0x14FFFFFF; // 8% White - Kyant's base glass
+    public static final int SURFACE_ALT = 0x22FFFFFF; // 13% White
+    public static final int BORDER = 0x26FFFFFF; // 15% White - Sharp glass edge
+    public static final int TEXT_PRIMARY = 0xFFFFFFFF; 
+    public static final int TEXT_SECONDARY = 0x80FFFFFF; // 50% White - Vibrancy effect
+    public static final int ACCENT = 0xFF007AFF; // Modern iOS Blue
+    public static final int ACCENT_TEXT = 0xFFFFFFFF;
+    public static final int CHANGED = 0xB3FF3B30;
+
+
+
 
     public static GradientDrawable card() {
         GradientDrawable d = new GradientDrawable();
+        // Use a slightly darker center for better legibility on blurred backgrounds
         d.setColor(SURFACE);
-        d.setCornerRadius(dp(24));
+        d.setCornerRadius(dp(32)); 
         d.setStroke(dp(1), BORDER);
         return d;
     }
@@ -128,22 +133,22 @@ public class UiKit {
 
     public static void styleEyebrow(TextView t) {
         t.setTextColor(ACCENT);
-        t.setTextSize(13);
+        t.setTextSize(12);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setLetterSpacing(0.08f);
+        t.setLetterSpacing(0.05f);
         t.setAllCaps(true);
     }
 
     public static void styleBody(TextView t) {
         t.setTextColor(TEXT_PRIMARY);
-        t.setTextSize(16);
+        t.setTextSize(15);
         t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
-        t.setLineSpacing(0, 1.2f);
+        t.setLineSpacing(0, 1.1f);
     }
 
     public static void styleCaption(TextView t) {
         t.setTextColor(TEXT_SECONDARY);
-        t.setTextSize(13);
+        t.setTextSize(12);
         t.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
     }
 
@@ -269,8 +274,104 @@ public class UiKit {
                 .setInterpolator(new SpringInterpolator(0.6)).start();
     }
 
+    // AGSL Shader Strings from Kyant's AndroidLiquidGlass
+    private static final String ROUNDED_RECT_SDF = 
+        "float radiusAt(float2 coord, float4 radii) {" +
+        "    if (coord.x >= 0.0) { if (coord.y <= 0.0) return radii.y; else return radii.z; }" +
+        "    else { if (coord.y <= 0.0) return radii.x; else return radii.w; }" +
+        "}" +
+        "float sdRoundedRect(float2 coord, float2 halfSize, float radius) {" +
+        "    float2 cornerCoord = abs(coord) - (halfSize - float2(radius));" +
+        "    float outside = length(max(cornerCoord, 0.0)) - radius;" +
+        "    float inside = min(max(cornerCoord.x, cornerCoord.y), 0.0);" +
+        "    return outside + inside;" +
+        "}" +
+        "float2 gradSdRoundedRect(float2 coord, float2 halfSize, float radius) {" +
+        "    float2 cornerCoord = abs(coord) - (halfSize - float2(radius));" +
+        "    if (cornerCoord.x >= 0.0 || cornerCoord.y >= 0.0) { return sign(coord) * normalize(max(cornerCoord, 0.0)); }" +
+        "    else { float gradX = step(cornerCoord.y, cornerCoord.x); return sign(coord) * float2(gradX, 1.0 - gradX); }" +
+        "}";
+
+    private static final String REFRACTION_SHADER = 
+        "uniform shader content;" +
+        "uniform float2 size;" +
+        "uniform float4 cornerRadii;" +
+        "uniform float refractionHeight;" +
+        "uniform float refractionAmount;" +
+        ROUNDED_RECT_SDF +
+        "float circleMap(float x) { return 1.0 - sqrt(1.0 - x * x); }" +
+        "half4 main(float2 coord) {" +
+        "    float2 halfSize = size * 0.5;" +
+        "    float2 centeredCoord = coord - halfSize;" +
+        "    float radius = radiusAt(centeredCoord, cornerRadii);" +
+        "    float sd = sdRoundedRect(centeredCoord, halfSize, radius);" +
+        "    if (-sd >= refractionHeight) return content.eval(coord);" +
+        "    sd = min(sd, 0.0);" +
+        "    float d = circleMap(1.0 - -sd / refractionHeight) * refractionAmount;" +
+        "    float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));" +
+        "    float2 grad = normalize(gradSdRoundedRect(centeredCoord, halfSize, gradRadius));" +
+        "    return content.eval(coord + d * grad);" +
+        "}";
+
+    private static final String HIGHLIGHT_SHADER = 
+        "uniform shader content;" +
+        "uniform float2 size;" +
+        "uniform float4 cornerRadii;" +
+        "layout(color) uniform half4 color;" +
+        "uniform float angle;" +
+        "uniform float falloff;" +
+        ROUNDED_RECT_SDF +
+        "half4 main(float2 coord) {" +
+        "    float2 halfSize = size * 0.5;" +
+        "    float2 centeredCoord = coord - halfSize;" +
+        "    float radius = radiusAt(centeredCoord, cornerRadii);" +
+        "    float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));" +
+        "    float2 grad = gradSdRoundedRect(centeredCoord, halfSize, gradRadius);" +
+        "    float2 normal = float2(cos(angle), sin(angle));" +
+        "    float d = dot(grad, normal);" +
+        "    float intensity = pow(abs(d), falloff);" +
+        "    return content.eval(coord) + color * intensity;" +
+        "}";
+
     public static void applyLiquidGlass(View v) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            v.post(() -> {
+                try {
+                    int w = v.getWidth(), h = v.getHeight();
+                    if (w <= 0 || h <= 0) return;
+                    
+                    RuntimeShader refractShader = new RuntimeShader(REFRACTION_SHADER);
+                    refractShader.setFloatUniform("size", (float) w, (float) h);
+                    float r = (float) dp(32);
+                    refractShader.setFloatUniform("cornerRadii", r, r, r, r);
+                    refractShader.setFloatUniform("refractionHeight", (float) dp(20));
+                    refractShader.setFloatUniform("refractionAmount", (float) dp(12));
+                    
+                    RuntimeShader highShader = new RuntimeShader(HIGHLIGHT_SHADER);
+                    highShader.setFloatUniform("size", (float) w, (float) h);
+                    highShader.setFloatUniform("cornerRadii", r, r, r, r);
+                    highShader.setColorUniform("color", 0x33FFFFFF); // Kyant style highlight
+                    highShader.setFloatUniform("angle", (float) (-Math.PI / 4.0));
+                    highShader.setFloatUniform("falloff", 3.0f);
+                    
+                    RenderEffect blur = RenderEffect.createBlurEffect(32f, 32f, Shader.TileMode.MIRROR);
+                    RenderEffect refract = RenderEffect.createRuntimeShaderEffect(refractShader, "content");
+                    RenderEffect high = RenderEffect.createRuntimeShaderEffect(highShader, "content");
+                    
+                    // Add subtle Vibrancy boost
+                    android.graphics.ColorMatrix cm = new android.graphics.ColorMatrix();
+                    cm.setSaturation(1.6f);
+                    RenderEffect vibrant = RenderEffect.createColorFilterEffect(new android.graphics.ColorMatrixColorFilter(cm));
+
+                    // Final chain: High -> Vibrant -> Refract -> Blur
+                    RenderEffect chain = RenderEffect.createChainEffect(high, 
+                        RenderEffect.createChainEffect(vibrant, 
+                        RenderEffect.createChainEffect(refract, blur)));
+                    
+                    v.setRenderEffect(chain);
+                } catch (Exception ignored) {}
+            });
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             v.setRenderEffect(RenderEffect.createBlurEffect(25f, 25f, Shader.TileMode.MIRROR));
         }
     }

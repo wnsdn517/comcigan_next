@@ -119,7 +119,8 @@ public class MainActivity extends Activity {
         NotificationHelper.ensureChannels(this);
 
         FrameLayout rootFrame = new FrameLayout(this);
-        rootFrame.setBackgroundColor(UiKit.BG);
+        // Deep pure black background as per Kyant's style
+        rootFrame.setBackgroundColor(0xFF000000);
 
         LinearLayout outerCol = new LinearLayout(this);
         outerCol.setOrientation(LinearLayout.VERTICAL);
@@ -136,6 +137,11 @@ public class MainActivity extends Activity {
         rootFrame.addView(buildOnboardingOverlay(), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         setContentView(rootFrame);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Apply window-level blur to the wallpaper (Android 12+)
+            getWindow().setBackgroundBlurRadius(dp(32));
+        }
         loadPrefsIntoUi();
         showPage(prefs.schoolCode().isEmpty() ? 2 : 0);
 
@@ -190,6 +196,7 @@ public class MainActivity extends Activity {
         wrap.setOrientation(LinearLayout.HORIZONTAL);
         wrap.setBackgroundColor(UiKit.SURFACE);
         wrap.setPadding(dp(8), dp(10), dp(8), dp(10));
+        UiKit.applyLiquidGlass(wrap);
 
         tabButtons = new Button[TAB_NAMES.length];
         for (int i = 0; i < TAB_NAMES.length; i++) {
@@ -254,6 +261,8 @@ public class MainActivity extends Activity {
         onboardingStep2.setVisibility(View.GONE);
         onboardingStep3.setVisibility(View.GONE);
         onboardingStep4.setVisibility(View.GONE);
+
+        UiKit.applyLiquidGlass(onboardingOverlay);
         
         return onboardingOverlay;
     }
@@ -2591,6 +2600,7 @@ public class MainActivity extends Activity {
         c.setOrientation(LinearLayout.VERTICAL);
         c.setBackground(UiKit.card());
         c.setPadding(dp(14), dp(14), dp(14), dp(14));
+        UiKit.applyLiquidGlass(c);
         return c;
     }
 
