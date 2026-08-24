@@ -49,7 +49,6 @@ public class MainActivity extends Activity {
     private Prefs prefs;
 
     private LinearLayout[] pages;
-    private Button[] tabButtons;
     private static final String[] TAB_NAMES = {"시간표", "급식", "설정"};
     private static final String[] TAB_ICONS = {"📅", "🍱", "⚙️"};
 
@@ -251,46 +250,22 @@ public class MainActivity extends Activity {
         mappingTickHandler.removeCallbacksAndMessages(null);
     }
 
-    private LinearLayout buildBottomNav() {
-        // Kotlin: sets up its own orientation/background/padding/shader --
-        // see LiquidGlassBottomBar's class doc.
-        LinearLayout wrap = new LiquidGlassBottomBar(this);
+    // Kotlin: a single sliding glass-pill indicator behind whichever tab is
+    // selected, rather than each tab drawing its own static highlight --
+    // see LiquidGlassBottomTabs's class doc. Owns all three tabs' visual
+    // state itself; showPage() below only calls setActiveTab().
+    private LiquidGlassBottomTabs bottomTabs;
 
-        tabButtons = new Button[TAB_NAMES.length];
-        for (int i = 0; i < TAB_NAMES.length; i++) {
-            Button b = new Button(this);
-            b.setText(TAB_ICONS[i] + "  " + TAB_NAMES[i]);
-            b.setTextSize(13);
-            b.setAllCaps(false);
-            b.setElevation(0);
-            b.setStateListAnimator(null);
-            b.setBackground(null);
-            b.setPadding(dp(4), dp(8), dp(4), dp(8));
-            final int idx = i;
-            b.setOnClickListener(v -> { UiKit.popIn(v); showPage(idx); });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-            lp.setMargins(dp(3), 0, dp(3), 0);
-            wrap.addView(b, lp);
-            tabButtons[i] = b;
-        }
-        return wrap;
-    }
-
-    private GradientDrawable activeTabBg() {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(blend(UiKit.ACCENT, UiKit.SURFACE, 0.16f));
-        d.setCornerRadius(dp(999));
-        return d;
+    private View buildBottomNav() {
+        bottomTabs = new LiquidGlassBottomTabs(this, TAB_NAMES, TAB_ICONS, this::showPage);
+        return bottomTabs;
     }
 
     private void showPage(int index) {
         for (int i = 0; i < pages.length; i++) {
             pages[i].setVisibility(i == index ? View.VISIBLE : View.GONE);
-            boolean active = i == index;
-            tabButtons[i].setTextColor(active ? UiKit.ACCENT : UiKit.TEXT_SECONDARY);
-            tabButtons[i].setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            tabButtons[i].setBackground(active ? activeTabBg() : null);
         }
+        bottomTabs.setActiveTab(index, true);
         nowPanelHandler.removeCallbacksAndMessages(null);
         mappingTickHandler.removeCallbacksAndMessages(null);
         if (index == 0) { loadAllWeeks(); tickNowPanel(); }

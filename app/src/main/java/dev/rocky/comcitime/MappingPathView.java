@@ -63,7 +63,10 @@ public class MappingPathView extends View {
     private final Paint emptyPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint floorUpPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint floorDownPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint floorTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    // Vertical screen distance drawn per floor of estimated change -- see
+    // drawElevatedPosition(). Tuned to read clearly against the 1-meter
+    // floor grid without dwarfing it.
+    private static final int FLOOR_HEIGHT_DP = 22;
 
     public MappingPathView(Context ctx) {
         super(ctx);
@@ -82,12 +85,11 @@ public class MappingPathView extends View {
         emptyPaint.setColor(UiKit.TEXT_SECONDARY);
         emptyPaint.setTextSize(28f);
         floorUpPaint.setColor(0xFF57C785); // same green as curPaint -- "going up"
-        floorUpPaint.setStyle(Paint.Style.FILL);
+        floorUpPaint.setStyle(Paint.Style.STROKE);
+        floorUpPaint.setStrokeWidth(UiKit.dp(2));
         floorDownPaint.setColor(0xFFFF7A7A); // warm red -- "going down"
-        floorDownPaint.setStyle(Paint.Style.FILL);
-        floorTextPaint.setColor(UiKit.TEXT_PRIMARY);
-        floorTextPaint.setTextSize(UiKit.dp(12));
-        floorTextPaint.setTextAlign(Paint.Align.CENTER);
+        floorDownPaint.setStyle(Paint.Style.STROKE);
+        floorDownPaint.setStrokeWidth(UiKit.dp(2));
     }
 
     public void setPath(List<double[]> path, double curX, double curY) {
@@ -327,33 +329,28 @@ public class MappingPathView extends View {
         canvas.drawCircle(origin[0], origin[1], UiKit.dp(5), originPaint);
 
         float[] cur = project(curX, curY, cx, cy, scale, midX, midY);
-        canvas.drawCircle(cur[0], cur[1], UiKit.dp(7), curPaint);
-        if (floorDelta != 0) drawFloorIndicator(canvas, cur[0], cur[1]);
+        if (floorDelta != 0) {
+            drawElevatedPosition(canvas, cur[0], cur[1]);
+        } else {
+            canvas.drawCircle(cur[0], cur[1], UiKit.dp(7), curPaint);
+        }
     }
 
-    // A small filled triangle beside the current-position dot, pointing up
-    // (green) or down (red) per floorDelta's sign, with the floor count
-    // alongside it -- e.g. "+1" while climbing a stairwell.
-    private void drawFloorIndicator(Canvas canvas, float cx, float cy) {
+    // Renders floor change as actual vertical displacement in the
+    // isometric space, the way an isometric game shows height, instead of
+    // a flat badge/number bolted onto a 2D dot: a faint ring stays at
+    // ground level (cur[0], cur[1]) as a shadow reference, a riser line
+    // climbs (or drops) from it by floorDelta floors, and the real
+    // position dot sits at the far end of that riser -- so "went up two
+    // floors" reads as the dot visibly floating two floor-heights above
+    // its own ground shadow, not as a "+2" label.
+    private void drawElevatedPosition(Canvas canvas, float groundX, float groundY) {
         boolean up = floorDelta > 0;
-        Paint fill = up ? floorUpPaint : floorDownPaint;
-        float ax = cx + UiKit.dp(14);
-        float ay = cy;
-        float half = UiKit.dp(6);
-        Path arrow = new Path();
-        if (up) {
-            arrow.moveTo(ax, ay - half);
-            arrow.lineTo(ax + half, ay + half);
-            arrow.lineTo(ax - half, ay + half);
-        } else {
-            arrow.moveTo(ax, ay + half);
-            arrow.lineTo(ax + half, ay - half);
-            arrow.lineTo(ax - half, ay - half);
-        }
-        arrow.close();
-        canvas.drawPath(arrow, fill);
-        canvas.drawText(String.format(java.util.Locale.KOREA, "%+d", floorDelta),
-                ax, ay - half - UiKit.dp(4), floorTextPaint);
+        float riserPx = Math.abs(floorDelta) * UiKit.dp(FLOOR_HEIGHT_DP);
+        float elevatedY = up ? groundY - riserPx : groundY + riserPx;
+        canvas.drawCircle(groundX, groundY, UiKit.dp(4), originPaint);
+        canvas.drawLine(groundX, groundY, groundX, elevatedY, up ? floorUpPaint : floorDownPaint);
+        canvas.drawCircle(groundX, elevatedY, UiKit.dp(7), curPaint);
     }
 
     private void drawDiamond(Canvas canvas, float cx, float cy, float r, Paint paint) {
