@@ -15,6 +15,21 @@ public class Prefs {
         sp = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE);
     }
 
+    public float schoolLat() { return sp.getFloat("school_lat", 0f); }
+    public float schoolLon() { return sp.getFloat("school_lon", 0f); }
+    public void setSchoolLocation(float lat, float lon) {
+        sp.edit().putFloat("school_lat", lat).putFloat("school_lon", lon).apply();
+    }
+
+    public boolean isTeacherMode() { return sp.getBoolean("is_teacher_mode", false); }
+    public void setTeacherMode(boolean v) { sp.edit().putBoolean("is_teacher_mode", v).apply(); }
+
+    public String teacherName() { return sp.getString("teacher_name", ""); }
+    public void setTeacherName(String v) { sp.edit().putString("teacher_name", v).apply(); }
+
+    public boolean testMode() { return sp.getBoolean("test_mode", false); }
+    public void setTestMode(boolean v) { sp.edit().putBoolean("test_mode", v).apply(); }
+
     public String schoolCode() { return sp.getString("schoolCode", ""); }
     public String schoolName() { return sp.getString("schoolName", ""); }
     public int grade() { return sp.getInt("grade", 1); }

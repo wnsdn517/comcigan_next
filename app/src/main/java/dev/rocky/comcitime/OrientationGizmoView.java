@@ -79,18 +79,24 @@ public class OrientationGizmoView extends View {
     }
 
     private float[] rotate(float x, float y, float z) {
-        double r = Math.toRadians(rollDeg);
+        // Android Azimuth (headingDeg) is CW positive. Math rotation is CCW.
+        // We negate h to match the 3D projection's CCW expectation.
+        double h = Math.toRadians(-headingDeg);
         double p = Math.toRadians(pitchDeg);
-        double h = Math.toRadians(headingDeg);
-        // roll around the phone's long (Y) axis
+        double r = Math.toRadians(rollDeg);
+
+        // 1. Roll around Y axis
         double x1 = x * Math.cos(r) + z * Math.sin(r);
         double z1 = -x * Math.sin(r) + z * Math.cos(r);
-        // pitch around the phone's short (X) axis
+
+        // 2. Pitch around X axis
         double y2 = y * Math.cos(p) - z1 * Math.sin(p);
         double z2 = y * Math.sin(p) + z1 * Math.cos(p);
-        // heading (yaw) around the vertical axis
-        double x3 = x1 * Math.cos(h) - z2 * Math.sin(h);
-        double z3 = x1 * Math.sin(h) + z2 * Math.cos(h);
-        return new float[]{(float) x3, (float) y2, (float) z3};
+
+        // 3. Heading (Azimuth) around Z axis
+        double x3 = x1 * Math.cos(h) - y2 * Math.sin(h);
+        double y3 = x1 * Math.sin(h) + y2 * Math.cos(h);
+
+        return new float[]{(float) x3, (float) y3, (float) z2};
     }
 }

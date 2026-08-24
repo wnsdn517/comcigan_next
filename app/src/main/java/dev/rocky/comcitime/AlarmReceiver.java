@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.List;
 
@@ -63,6 +64,10 @@ public class AlarmReceiver extends BroadcastReceiver {
     private void handleMorning(Context ctx, Prefs prefs) {
         int dow = todayDow();
         if (dow == 0) return; // no school on weekends
+        if (prefs.isTeacherMode()) {
+            handleTeacherMorning(ctx, prefs, dow);
+            return;
+        }
         fetchToday(ctx, prefs, (tt, offline) -> {
             List<Timetable.PeriodEntry> today = tt.getDaySchedule(prefs.grade(), prefs.classNum(), dow);
             if (today.isEmpty()) {
@@ -86,9 +91,38 @@ public class AlarmReceiver extends BroadcastReceiver {
         });
     }
 
+    private void handleTeacherMorning(Context ctx, Prefs prefs, int dow) {
+        fetchToday(ctx, prefs, (tt, offline) -> {
+            List<Timetable.TeacherPeriodEntry> week = tt.getTeacherWeek(prefs.teacherName());
+            List<Timetable.TeacherPeriodEntry> today = new ArrayList<>();
+            for (Timetable.TeacherPeriodEntry e : week) if (e.dayOfWeek == dow) today.add(e);
+            if (today.isEmpty()) {
+                NotificationHelper.show(ctx, NotificationHelper.ID_MORNING, NotificationHelper.CHANNEL_ALERTS,
+                        "오늘의 시간표 (교사)", "오늘은 수업이 없습니다.", true);
+                return;
+            }
+            StringBuilder sb = new StringBuilder();
+            for (int p = 1; p <= 8; p++) {
+                Timetable.TeacherPeriodEntry found = null;
+                for (Timetable.TeacherPeriodEntry e : today) if (e.period == p) { found = e; break; }
+                if (found != null) {
+                    sb.append(p).append("교시 ").append(found.grade).append("학년 ").append(found.classNum).append("반 ").append(found.subject);
+                    if (found.changed) sb.append(" [변경]");
+                    sb.append("\n");
+                }
+            }
+            NotificationHelper.show(ctx, NotificationHelper.ID_MORNING, NotificationHelper.CHANNEL_ALERTS,
+                    offline ? "오늘의 시간표 (교사, 오프라인)" : "오늘의 시간표 (교사)", sb.toString().trim(), true);
+        });
+    }
+
     private void handlePeriod(Context ctx, Prefs prefs, int justEndedPeriod) {
         int dow = todayDow();
         if (dow == 0) return;
+        if (prefs.isTeacherMode()) {
+            handleTeacherPeriod(ctx, prefs, justEndedPeriod, dow);
+            return;
+        }
         fetchToday(ctx, prefs, (tt, offline) -> {
             List<Timetable.PeriodEntry> today = tt.getDaySchedule(prefs.grade(), prefs.classNum(), dow);
             Timetable.PeriodEntry next = null;
@@ -108,6 +142,26 @@ public class AlarmReceiver extends BroadcastReceiver {
             Prefs.PersonalEvent ev = prefs.findPersonalEvent(todayDate2, justEndedPeriod + 1);
             if (ev != null) text += "\n\ud83d\udcdd 일정: " + ev.text;
             if (offline) { title += " (오프라인)"; text += "\n(오프라인 데이터 -- 실제와 다를 수 있어요)"; }
+            NotificationHelper.show(ctx, NotificationHelper.ID_PERIOD, NotificationHelper.CHANNEL_ALERTS, title, text, true);
+        });
+    }
+
+    private void handleTeacherPeriod(Context ctx, Prefs prefs, int justEndedPeriod, int dow) {
+        fetchToday(ctx, prefs, (tt, offline) -> {
+            List<Timetable.TeacherPeriodEntry> week = tt.getTeacherWeek(prefs.teacherName());
+            Timetable.TeacherPeriodEntry next = null;
+            for (Timetable.TeacherPeriodEntry e : week) {
+                if (e.dayOfWeek == dow && e.period == justEndedPeriod + 1) { next = e; break; }
+            }
+            String title, text;
+            if (next == null) {
+                title = "수업 종료 (교사)";
+                text = justEndedPeriod + "교시가 마지막 수업이었습니다. 수고하셨습니다.";
+            } else {
+                title = (justEndedPeriod + 1) + "교시 수업 안내";
+                text = next.grade + "학년 " + next.classNum + "반 " + next.subject;
+                if (next.changed) text += " -- 시간표 변경됨";
+            }
             NotificationHelper.show(ctx, NotificationHelper.ID_PERIOD, NotificationHelper.CHANNEL_ALERTS, title, text, true);
         });
     }
