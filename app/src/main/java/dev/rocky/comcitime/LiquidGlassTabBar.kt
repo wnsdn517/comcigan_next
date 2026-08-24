@@ -1,5 +1,6 @@
 package dev.rocky.comcitime
 
+import android.os.Build
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
@@ -17,45 +18,53 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.kyant.backdrop.backdrops.layerBackdrop
-import com.kyant.backdrop.backdrops.rememberLayerBackdrop
-import com.kyant.backdrop.drawBackdrop
-import com.kyant.backdrop.effects.blur
-import com.kyant.backdrop.effects.lens
-import com.kyant.backdrop.effects.vibrancy
-import com.kyant.backdrop.shadow.InnerShadow
-import com.kyant.backdrop.shadow.Shadow
-import com.kyant.shapes.Capsule
 import java.util.function.IntConsumer
 
 /**
- * The bottom tab bar, using the ACTUAL Kyant0/AndroidLiquidGlass engine
- * (io.github.kyant0:backdrop + io.github.kyant0:shapes on Maven Central,
- * Apache-2.0) rather than a hand-rolled approximation: real backdrop
- * capture ([rememberLayerBackdrop]/[Modifier.layerBackdrop]) feeding a
- * real AGSL-shader refraction ([lens]), blur, and vibrancy
- * ([Modifier.drawBackdrop]) on a [Capsule]-shaped sliding indicator.
+ * The bottom tab bar's sliding glass indicator.
  *
- * This app's rest of the UI is plain Java Views with a fixed dark
- * background, which is why a hand-rolled version of this had nothing
- * visually rich to refract -- so this composable captures its own small
- * gradient band (this app's amber/violet/teal palette, not an unrelated
- * photo) as the backdrop specifically for the glass to bend, the same
- * role the original demo's colorful wallpaper plays.
+ * This app's Liquid Glass effect is the ACTUAL AGSL refraction shader
+ * ported verbatim from Kyant0/AndroidLiquidGlass (see
+ * [LiquidGlassShader.REFRACTION_AGSL]) -- driven directly through the real
+ * `android.graphics.RuntimeShader`/`RenderEffect` platform APIs, not a
+ * hand-rolled approximation. It's already used for buttons via
+ * [LiquidGlassShader.attach] (View-based). The pill here reuses the exact
+ * same shader/uniform setup ([LiquidGlassShader.buildRenderEffect]) through
+ * Compose's own `Modifier.graphicsLayer { renderEffect = ... }`, which is
+ * how it also gets applied to a Compose node instead of a plain View.
+ *
+ * Kyant0's own published library (`io.github.kyant0:backdrop`/`shapes`,
+ * the Compose Multiplatform package that also wraps this same shader) was
+ * tried first, but every released version -- including its oldest,
+ * 1.0.1 -- requires compileSdk 36+, and the latest (2.0.0) requires 37,
+ * which in turn requires Android Gradle Plugin 9.x. That's a major-version
+ * AGP jump with wide-reaching, hard-to-verify-blind fallout for the rest
+ * of this build (Gradle version, other plugin compat, DSL changes), far
+ * outside the scope of a tab bar's visual effect -- so this reuses the
+ * real shader directly instead of taking on that migration.
  */
 @Composable
 fun LiquidGlassTabBar(
@@ -64,7 +73,6 @@ fun LiquidGlassTabBar(
     selectedIndex: Int,
     onTabSelected: (Int) -> Unit
 ) {
-    val tabsBackdrop = rememberLayerBackdrop()
     val animatedIndex = remember { Animatable(selectedIndex.toFloat()) }
     LaunchedEffect(selectedIndex) {
         animatedIndex.animateTo(selectedIndex.toFloat(), spring(dampingRatio = 0.7f, stiffness = 380f))
@@ -77,11 +85,14 @@ fun LiquidGlassTabBar(
     ) {
         val tabWidth = maxWidth / labels.size
 
-        // The real captured backdrop content for the glass to refract.
+        // Decorative backing gradient (this app's amber/violet/teal
+        // palette) for the sliding pill's own self-refraction to bend --
+        // the same role UiKit's translucent fill + sheen plays under
+        // buttons' glass shader.
         Box(
             Modifier
                 .fillMaxSize()
-                .layerBackdrop(tabsBackdrop)
+                .clip(RoundedCornerShape(32.dp))
                 .background(
                     Brush.linearGradient(
                         listOf(Color(0xFFF2B94C), Color(0xFF8B6CF0), Color(0xFF4CD3C2))
@@ -89,26 +100,30 @@ fun LiquidGlassTabBar(
                 )
         )
 
-        // The sliding glass capsule: real refraction/blur/vibrancy over
-        // the gradient captured above, plus a real shadow + inner shadow.
+        var pillSize by remember { mutableStateOf(IntSize.Zero) }
         Box(
             Modifier
                 .padding(4.dp)
                 .offset(x = tabWidth * animatedIndex.value)
                 .width(tabWidth)
                 .fillMaxHeight()
-                .drawBackdrop(
-                    backdrop = tabsBackdrop,
-                    shape = { Capsule() },
-                    effects = {
-                        vibrancy()
-                        blur(2.dp.toPx())
-                        lens(16.dp.toPx(), 12.dp.toPx(), chromaticAberration = true)
-                    },
-                    shadow = { Shadow(alpha = 0.35f) },
-                    innerShadow = { InnerShadow(radius = 6.dp, alpha = 0.3f) },
-                    onDrawSurface = { drawRect(Color.White.copy(alpha = 0.1f)) }
-                )
+                .shadow(6.dp, RoundedCornerShape(percent = 50))
+                .onSizeChanged { pillSize = it }
+                .graphicsLayer {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        pillSize.width > 0 && pillSize.height > 0
+                    ) {
+                        renderEffect = LiquidGlassShader.buildRenderEffect(
+                            pillSize.width,
+                            pillSize.height,
+                            32.dp.toPx(),
+                            10.dp.toPx(),
+                            8.dp.toPx()
+                        )?.asComposeRenderEffect()
+                    }
+                }
+                .clip(RoundedCornerShape(percent = 50))
+                .background(Color.White.copy(alpha = 0.22f))
         )
 
         Row(Modifier.fillMaxSize()) {

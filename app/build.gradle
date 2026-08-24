@@ -69,11 +69,14 @@ android {
         jvmTarget = '17'
     }
 
-    // The real Kyant0/AndroidLiquidGlass engine (below) is a Jetpack
-    // Compose library, so the bottom tab bar is hosted as a small
-    // ComposeView island inside the otherwise-Java view tree (see
-    // MainActivity.buildBottomNav() / LiquidGlassTabBar.kt) rather
-    // than everything being rewritten onto Compose.
+    // Compose is used only for the bottom tab bar's layout/animation (a
+    // small ComposeView island inside the otherwise-Java view tree -- see
+    // MainActivity.buildBottomNav() / LiquidGlassTabBar.kt). Its glass
+    // effect is the real AGSL shader in LiquidGlassShader.java driven
+    // through Modifier.graphicsLayer, not Kyant0's published multiplatform
+    // library -- every version of that library requires compileSdk 36+
+    // (2.0.0 needs 37, needing Android Gradle Plugin 9.x), which is a much
+    // larger toolchain migration than this app's build currently takes on.
     buildFeatures {
         compose true
     }
@@ -92,13 +95,4 @@ dependencies {
     implementation 'androidx.compose.foundation:foundation'
     implementation 'androidx.compose.animation:animation'
     implementation 'androidx.activity:activity:1.9.0'
-
-    // The actual Liquid Glass rendering engine (real AGSL-shader-backed
-    // blur/lens/highlight/shadow effects over a captured backdrop layer),
-    // Apache-2.0, published by the same author as the shader source
-    // LiquidGlassShader.java already ports: https://github.com/Kyant0/AndroidLiquidGlass
-    implementation 'io.github.kyant0:backdrop:2.0.0'
-    // iOS-like shapes (Capsule, etc.) the backdrop library's own examples
-    // use for the glass surface's outline: https://github.com/Kyant0/Shapes
-    implementation 'io.github.kyant0:shapes:1.2.0'
 }
