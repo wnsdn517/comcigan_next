@@ -280,6 +280,50 @@ public class MappingDb extends SQLiteOpenHelper {
         return out;
     }
 
+    // Writes every recorded motion sample and waypoint out as one CSV file
+    // (a leading UTF-8 BOM so Excel renders the Hangul column headers/labels
+    // correctly instead of mojibake), for the Settings "움직임 기록 내보내기"
+    // export -- see MainActivity.exportMappingCsv(). Motion and waypoint
+    // rows share a single table (a `type` column distinguishes them) rather
+    // than two separate files, so the whole recording history for a session
+    // opens as one sortable sheet.
+    public void exportMotionCsv(java.io.Writer writer) throws java.io.IOException {
+        writer.write('\uFEFF'); // Excel-friendly BOM so Hangul headers/labels don't show as mojibake
+        writer.write("type,session_id,ts,heading_deg,pitch_deg,roll_deg,step_count,x,y,floor,label\n");
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor cur = db.rawQuery(
+                "SELECT session_id, ts, heading_deg, pitch_deg, roll_deg, step_count, x, y " +
+                        "FROM motion_samples ORDER BY session_id, ts", null)) {
+            while (cur.moveToNext()) {
+                writer.write(csvRow("motion", cur.getLong(0), cur.getLong(1),
+                        String.valueOf(cur.getFloat(2)), String.valueOf(cur.getFloat(3)), String.valueOf(cur.getFloat(4)),
+                        String.valueOf(cur.getInt(5)), cur.getDouble(6), cur.getDouble(7), "", ""));
+            }
+        }
+        try (Cursor cur = db.rawQuery(
+                "SELECT session_id, ts, floor, label, x, y FROM waypoints ORDER BY session_id, ts", null)) {
+            while (cur.moveToNext()) {
+                writer.write(csvRow("waypoint", cur.getLong(0), cur.getLong(1),
+                        "", "", "", "", cur.getDouble(4), cur.getDouble(5),
+                        cur.getString(2), cur.getString(3)));
+            }
+        }
+    }
+
+    private static String csvRow(String type, long sessionId, long ts, String heading, String pitch, String roll,
+                                  String stepCount, double x, double y, String floor, String label) {
+        return String.join(",", type, String.valueOf(sessionId), String.valueOf(ts), heading, pitch, roll,
+                stepCount, String.valueOf(x), String.valueOf(y), csvEscape(floor), csvEscape(label)) + "\n";
+    }
+
+    private static String csvEscape(String s) {
+        if (s == null) return "";
+        if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
+            return "\"" + s.replace("\"", "\"\"") + "\"";
+        }
+        return s;
+    }
+
     public List<String> recentWaypoints(long sessionId, int limit) {
         List<String> out = new ArrayList<>();
         SQLiteDatabase db = getReadableDatabase();

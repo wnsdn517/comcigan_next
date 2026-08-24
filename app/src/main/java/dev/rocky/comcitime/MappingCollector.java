@@ -425,7 +425,7 @@ public class MappingCollector {
         accelMaxInStep = -Float.MAX_VALUE;
         sessionId = db.startSession();
 
-        ctx.registerReceiver(scanReceiver, new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION));
+        registerScanReceiver();
 
         registerIfAvailable(Sensor.TYPE_ROTATION_VECTOR);
         registerIfAvailable(Sensor.TYPE_STEP_DETECTOR);
@@ -445,6 +445,31 @@ public class MappingCollector {
         startLocationUpdates();
 
         handler.post(scanTick);
+    }
+
+    // Wi-Fi scan results are a system broadcast (WifiManager.SCAN_RESULTS_
+    // AVAILABLE_ACTION), which doesn't need an export flag even on
+    // targetSdk 33+, but a couple of very common real-world causes of
+    // "collection just silently stops" are guarded against here anyway:
+    // devices/ROMs that enforce the flag requirement more strictly than
+    // AOSP does, and any other unexpected registration failure. Without
+    // this try/catch, an exception here would propagate out of start()
+    // and crash MappingService before runningCollector ever gets set,
+    // which looks to the user exactly like "permission granted but never
+    // actually starts" (see MainActivity.refreshMappingStatus()).
+    private void registerScanReceiver() {
+        try {
+            IntentFilter filter = new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                ctx.registerReceiver(scanReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                ctx.registerReceiver(scanReceiver, filter);
+            }
+        } catch (Exception ignored) {
+            // Wi-Fi scans just won't be picked up automatically -- everything
+            // else (steps/heading/etc.) keeps working, so this shouldn't take
+            // the whole collector down.
+        }
     }
 
     private void registerIfAvailable(int sensorType) {

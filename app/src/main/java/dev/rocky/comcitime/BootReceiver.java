@@ -20,6 +20,7 @@ public class BootReceiver extends BroadcastReceiver {
             }
             if (prefs.mappingConsentDone() && hasMappingPermissions(context)) {
                 context.startForegroundService(new Intent(context, MappingService.class));
+                MappingWatchdogReceiver.schedule(context);
             }
         }
     }

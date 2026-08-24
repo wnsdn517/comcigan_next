@@ -80,7 +80,7 @@ public class MainActivity extends Activity {
     private LinearLayout mealContent;
 
     private TextView mappingStatusText, mappingCountsText, mappingSensorText, mappingStrideText;
-    private Button mappingGrantBtn;
+    private Button mappingGrantBtn, mappingBatteryBtn;
     private EditText mappingFloorInput, mappingLabelInput;
     private OrientationGizmoView mappingGizmoView;
     private MappingPathView mappingPathView;
@@ -141,7 +141,75 @@ public class MainActivity extends Activity {
                 || checkSelfPermission(Manifest.permission.ACTIVITY_RECOGNITION) == PackageManager.PERMISSION_GRANTED;
         if (fineLocation && activityRecognition) {
             startForegroundService(new Intent(this, MappingService.class));
+            MappingWatchdogReceiver.schedule(this);
         }
+    }
+
+    // Whether the OS already exempts this app from Doze/App Standby battery
+    // throttling -- if not, the mapping background service is liable to get
+    // paused by the system during long idle stretches (screen off for
+    // hours, e.g. a school day) regardless of the START_STICKY/watchdog
+    // recovery paths, since those only bring it back once the OS lets it
+    // run again.
+    private boolean isIgnoringBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+        android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+    }
+
+    private void requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+        try {
+            Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "이 기기에서는 배터리 설정 화면을 열 수 없어요.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private static final int REQ_EXPORT_MOTION = 3;
+
+    // Lets the user record indoor-mapping motion data and export it under a
+    // filename they pick/edit themselves -- ACTION_CREATE_DOCUMENT opens the
+    // system "save as" picker (its filename field pre-filled with a
+    // timestamped suggestion, fully editable) so no storage permission is
+    // needed and this works the same way across every supported API level.
+    private void exportMappingCsv() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/csv");
+        String suggested = "comcitime_motion_"
+                + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.KOREA).format(new java.util.Date()) + ".csv";
+        intent.putExtra(Intent.EXTRA_TITLE, suggested);
+        try {
+            startActivityForResult(intent, REQ_EXPORT_MOTION);
+        } catch (android.content.ActivityNotFoundException e) {
+            Toast.makeText(this, "파일 저장 앱을 찾을 수 없어요.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_EXPORT_MOTION || resultCode != RESULT_OK || data == null || data.getData() == null) {
+            return;
+        }
+        android.net.Uri uri = data.getData();
+        new Thread(() -> {
+            boolean ok = true;
+            try (java.io.OutputStream out = getContentResolver().openOutputStream(uri)) {
+                if (out == null) throw new java.io.IOException("no output stream");
+                java.io.Writer writer = new java.io.OutputStreamWriter(out, java.nio.charset.StandardCharsets.UTF_8);
+                new MappingDb(this).exportMotionCsv(writer);
+                writer.flush();
+            } catch (java.io.IOException e) {
+                ok = false;
+            }
+            boolean success = ok;
+            runOnUiThread(() -> Toast.makeText(this,
+                    success ? "움직임 기록을 내보냈어요." : "내보내기에 실패했어요.", Toast.LENGTH_SHORT).show());
+        }).start();
     }
 
     private void requestNotifPermissionIfNeeded() {
@@ -188,7 +256,7 @@ public class MainActivity extends Activity {
     private LinearLayout buildBottomNav() {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.HORIZONTAL);
-        wrap.setBackgroundColor(UiKit.SURFACE);
+        wrap.setBackground(UiKit.glassBar());
         wrap.setPadding(dp(8), dp(10), dp(8), dp(10));
 
         tabButtons = new Button[TAB_NAMES.length];
@@ -1669,11 +1737,32 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams grantLp = matchWrap();
         grantLp.topMargin = dp(10);
         mappingGrantBtn.setOnClickListener(v -> requestMappingPermissionsIfNeeded(() -> {
+            // Also (re-)asserts consent so the auto-restart-on-launch check in
+            // onCreate() and BootReceiver keep working even if this button is
+            // how the user first actually got the service running.
+            prefs.setMappingConsentDone(true);
             startMappingServiceIfPermitted();
             refreshMappingStatus();
         }));
         statusCard.addView(mappingGrantBtn, grantLp);
+
+        mappingBatteryBtn = new Button(this);
+        mappingBatteryBtn.setText("배터리 절전 최적화 예외로 설정");
+        mappingBatteryBtn.setTextSize(12);
+        UiKit.styleSecondaryButton(mappingBatteryBtn);
+        LinearLayout.LayoutParams batteryLp = matchWrap();
+        batteryLp.topMargin = dp(8);
+        mappingBatteryBtn.setOnClickListener(v -> requestIgnoreBatteryOptimizations());
+        statusCard.addView(mappingBatteryBtn, batteryLp);
         section.addView(statusCard, cardLp());
+
+        Button exportBtn = new Button(this);
+        exportBtn.setText("움직임 기록 내보내기 (CSV)");
+        UiKit.styleSecondaryButton(exportBtn);
+        LinearLayout.LayoutParams exportLp = matchWrap();
+        exportLp.bottomMargin = dp(16);
+        exportBtn.setOnClickListener(v -> exportMappingCsv());
+        section.addView(exportBtn, exportLp);
 
         LinearLayout sensorCard = card();
         sensorCard.addView(eyebrow("실시간 센서 값 (3D)"));
@@ -1847,6 +1936,9 @@ public class MainActivity extends Activity {
             mappingStatusText.setText("권한이 필요해요.");
             mappingGrantBtn.setText("권한 허용하고 시작");
             mappingGrantBtn.setVisibility(View.VISIBLE);
+        }
+        if (mappingBatteryBtn != null) {
+            mappingBatteryBtn.setVisibility(isIgnoringBatteryOptimizations() ? View.GONE : View.VISIBLE);
         }
         MappingDb mappingDb = new MappingDb(this);
         MappingDb.Counts c = mappingDb.counts();

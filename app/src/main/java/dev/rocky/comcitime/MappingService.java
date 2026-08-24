@@ -35,8 +35,19 @@ public class MappingService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         startForeground(NotificationHelper.ID_MAPPING, NotificationHelper.buildMapping(this));
-        if (!collector.isRunning()) collector.start();
-        runningCollector = collector;
+        try {
+            if (!collector.isRunning()) collector.start();
+            runningCollector = collector;
+        } catch (Exception e) {
+            // Never let a collection-side failure crash the whole service --
+            // that would leave runningCollector null forever (looks to the
+            // user like "permission granted but stuck on 'not started yet'",
+            // see MainActivity.refreshMappingStatus()) with no way back
+            // short of reopening the app. The periodic watchdog below will
+            // keep retrying regardless.
+            android.util.Log.w("MappingService", "collector failed to start", e);
+        }
+        MappingWatchdogReceiver.schedule(this);
         return START_STICKY;
     }
 

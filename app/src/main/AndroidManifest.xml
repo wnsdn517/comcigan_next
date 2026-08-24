@@ -21,6 +21,11 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!-- Lets Settings offer an explicit "exempt this app from battery
+         optimization" prompt -- OEM battery managers are the most common
+         real-world cause of the mapping service silently going quiet
+         during long idle stretches (e.g. a school day). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <application
         android:label="컴시간알리미+"
@@ -55,6 +60,8 @@
             android:name="dev.rocky.comcitime.MappingService"
             android:exported="false"
             android:foregroundServiceType="location" />
+
+        <receiver android:name="dev.rocky.comcitime.MappingWatchdogReceiver" android:exported="false" />
 
     </application>
 </manifest>
