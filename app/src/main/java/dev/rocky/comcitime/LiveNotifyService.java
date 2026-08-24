@@ -13,6 +13,11 @@ import java.util.Locale;
 
 public class LiveNotifyService extends Service {
 
+    // How long before the school day's first period starts Live Notify
+    // switches from the generic "등교 전이거나 하교 후" message to already
+    // showing the first class, same as it does for a between-classes break.
+    private static final int PRE_SCHOOL_NOTICE_MINUTES = 30;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private Timetable cached;
     private String cachedForDate = "";
@@ -117,6 +122,9 @@ public class LiveNotifyService extends Service {
         if (current != null) {
             title = current.period + "교시 진행중 · " + formatRemaining(currentEnd - nowMinutes) + " 남음";
             text = current.subject + (current.teacher.isEmpty() ? "" : " (" + current.teacher + ")");
+        } else if (dayStart != null && nowMinutes >= dayStart - PRE_SCHOOL_NOTICE_MINUTES && nowMinutes < dayStart && next != null) {
+            title = "등교 전 · " + formatRemaining(nextStart - nowMinutes) + " 후 " + next.period + "교시";
+            text = next.subject + (next.teacher.isEmpty() ? "" : " (" + next.teacher + ")");
         } else if (dayStart != null && nowMinutes >= dayStart && nowMinutes < dayEnd) {
             if (next != null) {
                 title = "쉬는시간 · " + formatRemaining(nextStart - nowMinutes) + " 후 다음 수업";
