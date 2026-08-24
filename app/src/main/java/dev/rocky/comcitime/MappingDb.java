@@ -47,6 +47,26 @@ public class MappingDb extends SQLiteOpenHelper {
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        resetTables(db);
+    }
+
+    // Debug builds all share one fixed signing key specifically so
+    // `adb install -r` works across commits without uninstalling first
+    // (see app/build.gradle) -- which means a device can easily end up
+    // with an on-device DB_VERSION newer than whatever's checked out
+    // right now (e.g. after testing a later commit, then an earlier one).
+    // SQLiteOpenHelper's default onDowngrade() just throws
+    // ("Can't downgrade database from version X to Y"), crashing the app
+    // the moment this DB is touched. Since this table only holds
+    // expendable, anonymous, on-device-only mapping data (see class doc),
+    // resetting it exactly like onUpgrade() does is a fine trade for never
+    // crashing here.
+    @Override
+    public void onDowngrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+        resetTables(db);
+    }
+
+    private void resetTables(SQLiteDatabase db) {
         db.execSQL("DROP TABLE IF EXISTS sessions");
         db.execSQL("DROP TABLE IF EXISTS radio_scans");
         db.execSQL("DROP TABLE IF EXISTS motion_samples");
