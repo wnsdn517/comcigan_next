@@ -455,12 +455,26 @@ public class MappingCollector {
     // reports a step some tens to hundreds of ms after it actually
     // happened. STEP_COOLDOWN_MS guards against a single footfall's
     // vibration registering as more than one step.
+    //
+    // !isStationary is required too: the class doc's rhythm-consistency
+    // confirmation (see MAX_STEP_INTERVAL_MS above) assumes an isolated
+    // jolt isn't rhythmic, but in practice just holding the phone in hand
+    // -- not walking at all -- produced small, quasi-periodic jitter
+    // (hand tremor, breathing, shifting grip) that crossed PEAK_THRESHOLD
+    // often enough to fool that check, walking the dead-reckoned position
+    // steadily forward the whole time it was held. isStationary is
+    // computed from the same accelerometer sample just above (in
+    // onSensorChanged, stationary detection deliberately runs first) as a
+    // short-window variance -- genuine walking's accelerometer swing
+    // reliably drives that variance well past STATIONARY_THRESHOLD, so
+    // gating on it filters out exactly this kind of held-still jitter
+    // without touching real steps.
     private void processCustomStepDetection(float mag) {
         long now = System.currentTimeMillis();
         float gravity = 9.81f;
         float relativeMag = Math.abs(mag - gravity);
 
-        if (peakSearching && relativeMag > PEAK_THRESHOLD && (now - lastStepTimeMs) > STEP_COOLDOWN_MS) {
+        if (peakSearching && relativeMag > PEAK_THRESHOLD && !isStationary && (now - lastStepTimeMs) > STEP_COOLDOWN_MS) {
             onPeakDetected(now);
             peakSearching = false;
         } else if (!peakSearching && relativeMag < PEAK_THRESHOLD / 2) {
