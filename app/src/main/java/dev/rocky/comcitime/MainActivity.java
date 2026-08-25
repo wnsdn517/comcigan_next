@@ -2519,6 +2519,14 @@ public class MainActivity extends Activity {
             if (connSsid == null || connSsid.isEmpty()) connSsid = "(연결됨)";
             sb.append(String.format(Locale.KOREA, "🔗 %-18s %4d dBm  ← 실시간\n\n", connSsid, connRssi));
         }
+        // Measured, not assumed: a throttled startScan() returns stale
+        // results rather than an error, so counting scans that actually
+        // brought new data is the only way to tell from inside the app
+        // whether this device enforces the 4-per-2-minutes quota.
+        int fresh = running.getFreshScansLast2Min();
+        sb.append(String.format(Locale.KOREA,
+                "실제 새 스캔: 최근 2분간 %d회 %s\n\n",
+                fresh, fresh <= 5 ? "(스캔 제한 켜짐 — 4회가 한도)" : "(스캔 제한 꺼짐 — 최대 속도로 수집 중)"));
         sb.append(formatScannedApList(running));
         return sb.toString();
     }

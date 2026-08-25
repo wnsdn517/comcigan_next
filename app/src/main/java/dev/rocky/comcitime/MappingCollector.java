@@ -336,6 +336,20 @@ public class MappingCollector {
     // see recordScanResults().
     private long lastScanTimestampUs = 0;
 
+    // Wall-clock times of scans that actually passed the freshness gate.
+    // Counting these over a trailing 2 minutes measures the device's REAL
+    // scan rate, which is otherwise impossible to know from inside the app:
+    // a throttled startScan() is not reported as an error, it just returns
+    // stale results. Against the documented 4-per-2-minutes quota, the
+    // count says directly whether this device is enforcing the throttle --
+    // which is exactly the thing that decides whether scanning faster is
+    // even possible here. Sized well above any plausible rate so a fast
+    // (unthrottled) device doesn't wrap within the window.
+    private static final int SCAN_RATE_WINDOW = 256;
+    private static final long SCAN_RATE_SPAN_MS = 120_000;
+    private final long[] freshScanTimesMs = new long[SCAN_RATE_WINDOW];
+    private int freshScanIdx = 0;
+
     // Latest live place-recognition result (MappingDb.recognizePlace()),
     // refreshed on every Wi-Fi scan alongside the fingerprint-correction
     // match above -- cheap, since rssiByBssid is already computed for that
@@ -1065,6 +1079,20 @@ public class MappingCollector {
     public double getLastStepLengthM() { return lastStepLengthM; }
     public java.util.Map<String, Integer> getLastScanRssi() { return lastScanRssi; }
     public java.util.Map<String, String> getLastScanSsidByBssid() { return lastScanSsidByBssid; }
+    // How many genuinely-new scans landed in the last 2 minutes. Compare
+    // against 4 (the documented foreground quota): at or below it the
+    // throttle is being enforced and no app on this device can go faster;
+    // well above it the throttle is off, and this collector is already
+    // taking advantage (see SCAN_INTERVAL_MS).
+    public int getFreshScansLast2Min() {
+        long cutoff = System.currentTimeMillis() - SCAN_RATE_SPAN_MS;
+        int n = 0;
+        for (long t : freshScanTimesMs) {
+            if (t > cutoff) n++;
+        }
+        return n;
+    }
+
     public int getConnectedRssi() { return connectedRssi; }
     public String getConnectedSsid() { return connectedSsid; }
     public String getConnectedBssid() { return connectedBssid; }
@@ -1241,6 +1269,8 @@ public class MappingCollector {
         initParticles();
         refPressureHpa = 0f;
         lastScanTimestampUs = 0;
+        java.util.Arrays.fill(freshScanTimesMs, 0L);
+        freshScanIdx = 0;
         connectedRssi = 0;
         connectedBssid = "";
         connectedSsid = "";
@@ -1552,6 +1582,8 @@ public class MappingCollector {
         }
         if (results.isEmpty() || newestUs <= lastScanTimestampUs) return;
         lastScanTimestampUs = newestUs;
+        freshScanTimesMs[freshScanIdx] = System.currentTimeMillis();
+        freshScanIdx = (freshScanIdx + 1) % SCAN_RATE_WINDOW;
 
         int top = -120;
         java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
