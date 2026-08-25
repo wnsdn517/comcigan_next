@@ -149,6 +149,64 @@ public class MappingCollector {
     private static final float METERS_PER_HPA = 8.3f;
     private static final float FLOOR_HEIGHT_M = 3.5f;
 
+    // ---- Floor tracking (see updateFloorEstimate()).
+    //
+    // Floor used to be derived by comparing current pressure straight
+    // against whatever the pressure happened to be at session start. That
+    // treats ALL pressure change as altitude change, but ambient weather
+    // pressure drifts on its own by a few hPa over a day -- and at
+    // METERS_PER_HPA/FLOOR_HEIGHT_M, a single hPa of weather drift reads
+    // as ~2.4 floors. So just sitting still from morning to afternoon
+    // silently "moved" the user several floors.
+    //
+    // What separates the two is rate, plus corroboration from actual
+    // vertical movement:
+    //   - Weather drifts ~1-3 hPa over HOURS (~0.0005 hPa/s), and comes
+    //     with no vertical motion at all.
+    //   - A real floor change is ~0.42 hPa (3.5m) over the seconds it
+    //     takes to climb stairs or ride an elevator (~0.04-0.1 hPa/s,
+    //     roughly two orders of magnitude faster), and is necessarily
+    //     accompanied by real vertical acceleration (elevator start/stop)
+    //     or walking (stairs).
+    //
+    // So a slowly-adapting baseline (FLOOR_ADAPT_TAU_S) absorbs weather
+    // without ever reporting a floor change, while a genuine transition
+    // outruns that adaptation and gets committed -- but only when
+    // vertical motion actually corroborates it, which is what rejects
+    // non-altitude pressure transients (a slammed door, HVAC kicking in,
+    // wind gusting against the building) that are fast but aren't the
+    // user going anywhere.
+
+    // Baseline chases current pressure with this time constant while the
+    // reading sits near the current floor. Must be well faster than
+    // weather drift and well slower than a real floor transition; 60s sits
+    // roughly a decade away from each.
+    private static final float FLOOR_ADAPT_TAU_S = 60f;
+    // Offset (in floors) below which a reading is treated as "still on the
+    // current floor, this is weather" and tracked by the baseline.
+    private static final float FLOOR_ADAPT_BAND = 0.35f;
+    // Offset (in floors) at which a corroborated excursion is committed as
+    // a real floor change. Deliberately above FLOOR_ADAPT_BAND, so there's
+    // a hold-and-see gap between "definitely weather" and "definitely a
+    // floor" instead of a single knife-edge threshold to chatter across.
+    private static final float FLOOR_COMMIT_THRESHOLD = 0.7f;
+    // World-frame vertical acceleration (see vertAccelSmoothed) above which
+    // the phone is considered to be genuinely moving up/down -- an
+    // elevator's start/stop transient is typically 0.5-1.5 m/s^2.
+    private static final float VERT_ACCEL_MOTION_THRESHOLD = 0.25f;
+    // How long a vertical-motion observation stays "recent" enough to
+    // corroborate a pressure excursion. Long enough to bracket a whole
+    // stair flight or elevator ride, including the constant-velocity
+    // middle of an elevator trip where there's no acceleration at all.
+    private static final long VERTICAL_MOTION_MEMORY_MS = 15_000;
+    // After this long with no vertical motion whatsoever, an out-of-band
+    // offset can't be a floor change no matter how big it got, so the
+    // baseline adapts to it anyway. Without this escape a rare fast
+    // weather swing (a storm front) could park the offset outside the
+    // adapt band indefinitely, and then be falsely committed the moment
+    // the user next took a step.
+    private static final long FLOOR_STALE_MS = 180_000;
+
     private final Context ctx;
     private final MappingDb db;
     private final WifiManager wifiManager;
@@ -332,7 +390,25 @@ public class MappingCollector {
     // processCustomStepDetection() instead of the raw accelerometer, see
     // class doc for why.
     private float linAccelX, linAccelY, linAccelZ, linAccelMag = 0f;
+    // World-frame vertical acceleration (+ = upward), i.e. linear
+    // acceleration projected onto the gravity vector -- see
+    // updateVerticalMotion(). Orientation-independent by construction,
+    // unlike reading any single device axis.
+    private float vertAccel = 0f, vertAccelSmoothed = 0f;
+    private static final float VERT_ACCEL_EMA = 0.1f;
+    private long lastVerticalMotionMs = 0;
+    // Whether this device actually provides TYPE_LINEAR_ACCELERATION; when
+    // it doesn't, deriveLinearAccelFallback() stands in for it.
+    private boolean hasLinearAccel = false;
     private float pressureHpa = 0f, refPressureHpa = 0f;
+    // Floor tracking state -- see the FLOOR_* constants above and
+    // updateFloorEstimate(). floorRefPressureHpa is the pressure baseline
+    // for whichever floor committedFloorDelta says we're on, and drifts
+    // with the weather; committedFloorDelta only ever changes on a
+    // vertical-motion-corroborated transition.
+    private float floorRefPressureHpa = 0f;
+    private int committedFloorDelta = 0;
+    private long lastFloorUpdateMs = 0;
     private int lastTopRssi = -120;
     private int screenRotationDeg = -1;
     private double lastLat = Double.NaN, lastLon = Double.NaN;
@@ -422,6 +498,12 @@ public class MappingCollector {
                     accelMag = vectorMag(event.values);
                     accelMinInStep = Math.min(accelMinInStep, accelMag);
                     accelMaxInStep = Math.max(accelMaxInStep, accelMag);
+                    // TYPE_LINEAR_ACCELERATION is a synthesized sensor and
+                    // isn't guaranteed to exist. Without this fallback, a
+                    // device that lacks it would register no listener for
+                    // it, and step/stationary detection -- which now hang
+                    // off that event -- would simply never run at all.
+                    if (!hasLinearAccel) deriveLinearAccelFallback();
                     break;
                 case Sensor.TYPE_LINEAR_ACCELERATION:
                     linAccelX = event.values[0]; linAccelY = event.values[1]; linAccelZ = event.values[2];
@@ -431,6 +513,7 @@ public class MappingCollector {
                     // previous one.
                     processStationaryDetection(linAccelMag);
                     processCustomStepDetection(linAccelMag);
+                    updateVerticalMotion();
                     break;
                 case Sensor.TYPE_GYROSCOPE:
                     gyroX = event.values[0]; gyroY = event.values[1]; gyroZ = event.values[2];
@@ -468,6 +551,7 @@ public class MappingCollector {
                     pressureHpa = event.values[0];
                     if (refPressureHpa == 0f) refPressureHpa = pressureHpa;
                     updateBarometricActivity(pressureHpa);
+                    updateFloorEstimate(pressureHpa);
                     break;
             }
         }
@@ -734,6 +818,105 @@ public class MappingCollector {
         lastPressureTime = now;
     }
 
+    // World-frame vertical acceleration: the gravity-compensated linear
+    // acceleration projected onto the (unit) gravity direction. Gravity
+    // points down, hence the negation -- positive is upward. Doing it this
+    // way rather than reading one device axis makes it independent of how
+    // the phone is held, which is the whole point: the phone is rarely
+    // level, so "the Z axis" is not "up".
+    //
+    // Feeds the vertical-motion corroboration that gates floor changes
+    // (see updateFloorEstimate()). Only an EMA-smoothed magnitude is used
+    // there, never an integral -- integrating accelerometer noise into
+    // velocity/displacement drifts badly, and nothing here needs to know
+    // how far the phone moved vertically, only whether it moved at all.
+    // Stand-in for TYPE_LINEAR_ACCELERATION on a device that doesn't
+    // provide it, so the detectors it drives keep working. Subtracting the
+    // gravity vector from the raw accelerometer is exactly what the
+    // platform's own fused version computes, so where TYPE_GRAVITY exists
+    // this is equivalent (just unsmoothed). If neither fused sensor is
+    // available, this degrades to the original flat-phone constant
+    // subtraction -- the tilt bug is back in that case, but only on
+    // hardware that offers nothing better to use.
+    private void deriveLinearAccelFallback() {
+        boolean haveGravity = gravityX != 0f || gravityY != 0f || gravityZ != 0f;
+        if (haveGravity) {
+            linAccelX = accelX - gravityX;
+            linAccelY = accelY - gravityY;
+            linAccelZ = accelZ - gravityZ;
+            linAccelMag = (float) Math.sqrt(
+                    linAccelX * linAccelX + linAccelY * linAccelY + linAccelZ * linAccelZ);
+        } else {
+            linAccelX = 0f; linAccelY = 0f; linAccelZ = 0f;
+            linAccelMag = Math.abs(accelMag - 9.81f);
+        }
+        processStationaryDetection(linAccelMag);
+        processCustomStepDetection(linAccelMag);
+        updateVerticalMotion();
+    }
+
+    private void updateVerticalMotion() {
+        double gMag = Math.sqrt(gravityX * gravityX + gravityY * gravityY + gravityZ * gravityZ);
+        if (gMag < 1e-3) return; // no gravity reading yet (see updateMagneticReliability())
+        vertAccel = (float) -((linAccelX * gravityX + linAccelY * gravityY + linAccelZ * gravityZ) / gMag);
+        vertAccelSmoothed += (vertAccel - vertAccelSmoothed) * VERT_ACCEL_EMA;
+
+        // Two ways a real floor change shows up: an elevator's
+        // start/stop acceleration transient, or walking (which is what
+        // taking stairs looks like from here -- a steady stair climb is
+        // near-constant velocity, so it has almost no net vertical
+        // acceleration of its own to detect).
+        if (Math.abs(vertAccelSmoothed) > VERT_ACCEL_MOTION_THRESHOLD || inGaitStreak) {
+            lastVerticalMotionMs = System.currentTimeMillis();
+        }
+    }
+
+    private boolean verticalMotionRecently(long now) {
+        return lastVerticalMotionMs != 0 && (now - lastVerticalMotionMs) < VERTICAL_MOTION_MEMORY_MS;
+    }
+
+    // Floor estimation, replacing a plain "current pressure vs. pressure at
+    // session start" comparison that read ordinary daily weather drift as
+    // several floors of movement. See the FLOOR_* constants above for the
+    // rate/corroboration reasoning; in short, the baseline quietly follows
+    // weather, and only a fast excursion that vertical motion corroborates
+    // is committed as an actual floor change.
+    private void updateFloorEstimate(float pressure) {
+        long now = System.currentTimeMillis();
+        if (floorRefPressureHpa == 0f) {
+            floorRefPressureHpa = pressure;
+            lastFloorUpdateMs = now;
+            return;
+        }
+        float dt = (now - lastFloorUpdateMs) / 1000f;
+        lastFloorUpdateMs = now;
+        if (dt <= 0f) return;
+
+        float offsetFloors = (floorRefPressureHpa - pressure) * METERS_PER_HPA / FLOOR_HEIGHT_M;
+        float absOffset = Math.abs(offsetFloors);
+
+        boolean inAdaptBand = absOffset < FLOOR_ADAPT_BAND;
+        // No vertical motion for minutes on end means an out-of-band
+        // offset cannot be a floor change, however large it grew.
+        boolean stale = lastVerticalMotionMs == 0 || (now - lastVerticalMotionMs) > FLOOR_STALE_MS;
+
+        if (inAdaptBand || stale) {
+            // Track it as weather. Time-constant-based rather than a fixed
+            // per-sample fraction, so the adaptation speed doesn't silently
+            // change with the barometer's (device-dependent) sample rate.
+            float alpha = 1f - (float) Math.exp(-dt / FLOOR_ADAPT_TAU_S);
+            floorRefPressureHpa += (pressure - floorRefPressureHpa) * alpha;
+        } else if (absOffset >= FLOOR_COMMIT_THRESHOLD && verticalMotionRecently(now)) {
+            // Fast enough to have outrun the baseline, big enough to be a
+            // real floor, and the user demonstrably moved vertically.
+            committedFloorDelta += Math.round(offsetFloors);
+            floorRefPressureHpa = pressure; // re-anchor to the new floor
+        }
+        // Otherwise: between the bands, or uncorroborated -- hold, and let
+        // the next samples decide. A transient (door, HVAC, gust) simply
+        // falls back into the adapt band on its own.
+    }
+
     private void updateParticlesMotion(double stepLen, double rad) {
         java.util.Random rnd = new java.util.Random();
         for (int i = 0; i < NUM_PARTICLES; i++) {
@@ -859,13 +1042,24 @@ public class MappingCollector {
     public double getLastLat() { return lastLat; }
     public double getLastLon() { return lastLon; }
 
-    // Rough floor change since this session started, from the barometric
-    // pressure delta -- lowest-priority signal here (★★★☆☆), just a
-    // sanity-check estimate, not a substitute for real floor detection.
+    // Floor change since this session started. Barometer-derived, but only
+    // counting transitions that vertical motion actually corroborated --
+    // see updateFloorEstimate(), which is what keeps ordinary weather drift
+    // from reading as floors.
     public int getEstimatedFloorDelta() {
-        if (refPressureHpa == 0f || pressureHpa == 0f) return 0;
-        float meters = (refPressureHpa - pressureHpa) * METERS_PER_HPA;
-        return Math.round(meters / FLOOR_HEIGHT_M);
+        return committedFloorDelta;
+    }
+
+    public float getVertAccel() { return vertAccelSmoothed; }
+    public float getFloorRefPressureHpa() { return floorRefPressureHpa; }
+
+    // How far the current pressure sits from the current floor's baseline,
+    // in floors -- the raw pre-commit signal behind getEstimatedFloorDelta().
+    // Surfaced for the live readout/export so a floor that looks wrong can
+    // be traced to either a drifting baseline or a missed commit.
+    public float getFloorOffsetRaw() {
+        if (floorRefPressureHpa == 0f || pressureHpa == 0f) return 0f;
+        return (floorRefPressureHpa - pressureHpa) * METERS_PER_HPA / FLOOR_HEIGHT_M;
     }
 
     public int getHistoryCount() { return historyCount; }
@@ -1003,6 +1197,12 @@ public class MappingCollector {
         posY = prefs.lastPosY();
         initParticles();
         refPressureHpa = 0f;
+        floorRefPressureHpa = 0f;
+        committedFloorDelta = 0;
+        lastFloorUpdateMs = 0;
+        lastVerticalMotionMs = 0;
+        vertAccel = 0f;
+        vertAccelSmoothed = 0f;
         historyCount = 0;
         posVarX = 1.0;
         posVarY = 1.0;
@@ -1028,6 +1228,7 @@ public class MappingCollector {
         registerIfAvailable(Sensor.TYPE_MAGNETIC_FIELD);
         registerIfAvailable(Sensor.TYPE_PRESSURE);
         registerIfAvailable(Sensor.TYPE_GRAVITY);
+        hasLinearAccel = sensorManager.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION) != null;
         registerIfAvailable(Sensor.TYPE_LINEAR_ACCELERATION);
 
         orientationEventListener = new OrientationEventListener(ctx) {
@@ -1328,9 +1529,10 @@ public class MappingCollector {
         // verified against real data instead of guessed at.
         float gvX = gravityX, gvY = gravityY, gvZ = gravityZ;
         float laX = linAccelX, laY = linAccelY, laZ = linAccelZ;
+        float vAcc = vertAccelSmoothed, floorRef = floorRefPressureHpa, floorOff = getFloorOffsetRaw();
         dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y, floorDelta,
                 aX, aY, aZ, gX, gY, gZ, mX, mY, mZ, pressure, rssi,
-                gvX, gvY, gvZ, laX, laY, laZ));
+                gvX, gvY, gvZ, laX, laY, laZ, vAcc, floorRef, floorOff));
         if (listener != null) listener.onHeadingSteps(h, steps);
         persistPosition();
     }
