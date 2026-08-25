@@ -1998,7 +1998,10 @@ public class MainActivity extends Activity {
     private LinearLayout buildMappingSection() {
         LinearLayout section = new LinearLayout(this);
         section.setOrientation(LinearLayout.VERTICAL);
-        section.setVisibility(View.GONE);
+        // No longer starts GONE: this used to be Settings accordion
+        // content (hidden until its header was tapped), but it's now the
+        // direct, only content of its own top-level tab (buildMapPage()),
+        // so it needs to be visible by default like every other page.
         section.setPadding(0, dp(4), 0, dp(16));
 
         LinearLayout infoCard = card();
