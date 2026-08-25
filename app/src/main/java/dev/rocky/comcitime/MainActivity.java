@@ -1,7 +1,7 @@
 package dev.rocky.comcitime;
 
 import android.Manifest;
-import androidx.activity.ComponentActivity;
+import android.app.Activity;
 import android.app.Dialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -44,7 +44,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-public class MainActivity extends ComponentActivity {
+public class MainActivity extends Activity {
 
     private Prefs prefs;
 
@@ -79,6 +79,7 @@ public class MainActivity extends ComponentActivity {
     private String pendingSchoolCode = "", pendingSchoolName = "";
     private CheckBox notifyChangeCheck, notifyPeriodCheck, notifyMorningCheck, liveNotifyCheck;
     private CheckBox solidColorCheck;
+    private CheckBox alwaysRecordCheck;
     private EditText morningTimeInput;
     private EditText[] periodInputs = new EditText[8];
     private EditText neisKeyInput;
@@ -129,10 +130,9 @@ public class MainActivity extends ComponentActivity {
             container.addView(p, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
         outerCol.addView(container, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        // Explicit fixed height matching LiquidGlassTabBar's own
-        // BoxWithConstraints(...).height(64.dp) -- not WRAP_CONTENT (a
-        // previous View-based version of this bar hit the classic Android
-        // wrap_content-parent/match_parent-child sizing trap here).
+        // Explicit fixed height, not WRAP_CONTENT: an earlier version of
+        // this bar hit the classic Android wrap_content-parent/
+        // match_parent-child sizing trap and ballooned to fill the screen.
         outerCol.addView(buildBottomNav(), new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(64)));
 
         rootFrame.addView(outerCol, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -254,24 +254,68 @@ public class MainActivity extends ComponentActivity {
         mappingTickHandler.removeCallbacksAndMessages(null);
     }
 
-    // A Compose island (LiquidGlassTabBar.kt) hosting the real
-    // Kyant0/AndroidLiquidGlass engine, not a hand-rolled View-based
-    // approximation -- see LiquidGlassTabBarController's class doc.
-    // showPage() below only calls setSelectedIndex(); tapping a tab
-    // updates this the same way from the Compose side.
-    private LiquidGlassTabBarController bottomTabsController;
+    private LinearLayout[] tabPills;
+    private TextView[] tabLabels;
 
     private View buildBottomNav() {
-        androidx.compose.ui.platform.ComposeView composeView = new androidx.compose.ui.platform.ComposeView(this);
-        bottomTabsController = new LiquidGlassTabBarController(composeView, TAB_NAMES, TAB_ICONS, 0, this::showPage);
-        return composeView;
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setBackgroundColor(UiKit.SURFACE);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+
+        tabPills = new LinearLayout[TAB_NAMES.length];
+        tabLabels = new TextView[TAB_NAMES.length];
+        for (int i = 0; i < TAB_NAMES.length; i++) {
+            final int idx = i;
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.setGravity(Gravity.CENTER);
+            col.setClickable(true);
+            col.setFocusable(true);
+            col.setOnClickListener(v -> showPage(idx));
+            UiKit.attachBouncyPress(col);
+
+            LinearLayout pill = new LinearLayout(this);
+            pill.setOrientation(LinearLayout.VERTICAL);
+            pill.setGravity(Gravity.CENTER);
+            pill.setPadding(dp(14), dp(6), dp(14), dp(6));
+
+            TextView icon = new TextView(this);
+            icon.setText(TAB_ICONS[i]);
+            icon.setTextSize(16);
+            icon.setGravity(Gravity.CENTER);
+            pill.addView(icon);
+
+            TextView label = new TextView(this);
+            label.setText(TAB_NAMES[i]);
+            label.setTextSize(11);
+            label.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            labelLp.topMargin = dp(1);
+            pill.addView(label, labelLp);
+
+            col.addView(pill);
+            tabPills[i] = pill;
+            tabLabels[i] = label;
+            bar.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+        }
+        return bar;
+    }
+
+    private void updateBottomNavHighlight(int index) {
+        for (int i = 0; i < tabPills.length; i++) {
+            boolean active = i == index;
+            tabPills[i].setBackground(active ? UiKit.pillFilled(UiKit.ACCENT) : null);
+            tabLabels[i].setTextColor(active ? UiKit.ACCENT_TEXT : UiKit.TEXT_SECONDARY);
+            tabLabels[i].setTypeface(active ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+        }
     }
 
     private void showPage(int index) {
         for (int i = 0; i < pages.length; i++) {
             pages[i].setVisibility(i == index ? View.VISIBLE : View.GONE);
         }
-        bottomTabsController.setSelectedIndex(index);
+        updateBottomNavHighlight(index);
         nowPanelHandler.removeCallbacksAndMessages(null);
         mappingTickHandler.removeCallbacksAndMessages(null);
         if (index == 0) { loadAllWeeks(); tickNowPanel(); }
@@ -619,7 +663,7 @@ public class MainActivity extends ComponentActivity {
         root.addView(headerRow);
 
         TextView hint = new TextView(this);
-        hint.setText("길게 눌러 선생님 시간표 보기 (위로 밀면 고정) · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
+        hint.setText("길게 눌러 선생님 시간표 보기 (다시 탭하면 해제) · 탭 한 번은 일정 추가 · 좌우로 밀면 옆 반");
         hint.setTextColor(UiKit.TEXT_SECONDARY);
         hint.setTextSize(11);
         hint.setPadding(dp(20), 0, dp(20), dp(10));
@@ -826,10 +870,20 @@ public class MainActivity extends ComponentActivity {
             return;
         }
         browseClassNum = prefs.classNum();
-        viewingTeacherName = null;
-        teacherViewLocked = false;
-        classHeaderLabel.setText(prefs.grade() + "학년 " + browseClassNum + "반 \u203a");
-        teacherModeIndicator.setVisibility(View.GONE);
+        // "선생님 모드" in Settings means the main 시간표 tab IS that
+        // teacher's own schedule by default, not a student class's --
+        // reuses the same locked teacher view long-pressing a cell enters.
+        boolean teacherDefault = prefs.isTeacherMode() && !prefs.teacherName().trim().isEmpty();
+        viewingTeacherName = teacherDefault ? prefs.teacherName().trim() : null;
+        teacherViewLocked = teacherDefault;
+        if (teacherDefault) {
+            classHeaderLabel.setText(viewingTeacherName + " 선생님 시간표 \u203a");
+            teacherModeIndicator.setText("\ud83d\udd12 " + viewingTeacherName + " 선생님 시간표 -- 탭하면 반 시간표로");
+            teacherModeIndicator.setVisibility(View.VISIBLE);
+        } else {
+            classHeaderLabel.setText(prefs.grade() + "학년 " + browseClassNum + "반 \u203a");
+            teacherModeIndicator.setVisibility(View.GONE);
+        }
         weekSectionsContainer.removeAllViews();
         weekSections.clear();
         prevWeekBtn.setVisibility(prefs.archivedWeekDates().isEmpty() ? View.GONE : View.VISIBLE);
@@ -1098,7 +1152,7 @@ public class MainActivity extends ComponentActivity {
                             String teacherName = entry.teacher;
                             pending[0] = () -> {
                                 longPressFired[0] = true;
-                                enterTeacherViewLive(teacherName);
+                                enterTeacherView(teacherName);
                             };
                             handler.postDelayed(pending[0], 420);
                         }
@@ -1106,10 +1160,17 @@ public class MainActivity extends ComponentActivity {
                     return true;
                 }
                 case MotionEvent.ACTION_MOVE: {
+                    // Only guards against an in-progress *page scroll*
+                    // being mistaken for a long press before it fires --
+                    // once longPressFired is true the teacher view is
+                    // already shown and locked (see enterTeacherView()),
+                    // so hand movement afterward does nothing at all
+                    // instead of silently reverting it (that used to
+                    // require swiping up 70dp to "lock" first, and any
+                    // ordinary hand tremor while holding, short of that,
+                    // reverted the view the moment the finger lifted).
                     float dy = startY[0] - event.getRawY();
-                    if (longPressFired[0] && !teacherViewLocked && dy > dp(70)) {
-                        lockTeacherView();
-                    } else if (!longPressFired[0] && Math.abs(dy) > dp(18)) {
+                    if (!longPressFired[0] && Math.abs(dy) > dp(18)) {
                         moved[0] = true;
                         if (pending[0] != null) handler.removeCallbacks(pending[0]);
                     }
@@ -1121,9 +1182,7 @@ public class MainActivity extends ComponentActivity {
                                 .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
                     }
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
-                    if (longPressFired[0]) {
-                        if (!teacherViewLocked) exitTeacherView();
-                    } else if (!moved[0]) {
+                    if (!longPressFired[0] && !moved[0]) {
                         if (viewingTeacherName != null) {
                             exitTeacherView();
                         } else if (downPeriod[0] > 0 && downDay[0] > 0) {
@@ -1140,7 +1199,6 @@ public class MainActivity extends ComponentActivity {
                         touchedCell[0].animate().scaleX(1f).scaleY(1f).setDuration(120).start();
                     }
                     if (pending[0] != null) handler.removeCallbacks(pending[0]);
-                    if (longPressFired[0] && !teacherViewLocked) exitTeacherView();
                     return true;
                 }
             }
@@ -1258,21 +1316,18 @@ public class MainActivity extends ComponentActivity {
     }
 
     // Long-press fired: swap this AND every other section's grid to the
-    // teacher's schedule immediately, live, while the finger is still
-    // down (see attachGridTouch for why this is safe -- the touch
-    // listener lives on ws.grid, which rerenderAllSections() never
-    // detaches, only its children).
-    private void enterTeacherViewLive(String teacherName) {
+    // teacher's schedule immediately and lock it there (see
+    // attachGridTouch for why this is safe -- the touch listener lives
+    // on ws.grid, which rerenderAllSections() never detaches, only its
+    // children). Simple on purpose: no separate "hold to preview, then
+    // swipe up to lock" step -- that made ordinary hand movement while
+    // holding revert the view the moment the finger lifted.
+    private void enterTeacherView(String teacherName) {
         viewingTeacherName = teacherName;
-        teacherViewLocked = false;
-        teacherModeIndicator.setText(teacherName + " 선생님 시간표 -- 위로 밀면 고정");
+        teacherViewLocked = true;
+        teacherModeIndicator.setText("\ud83d\udd12 " + teacherName + " 선생님 시간표 -- 탭하면 반 시간표로");
         teacherModeIndicator.setVisibility(View.VISIBLE);
         rerenderAllSections();
-    }
-
-    private void lockTeacherView() {
-        teacherViewLocked = true;
-        teacherModeIndicator.setText("\ud83d\udd12 " + viewingTeacherName + " 선생님 시간표 고정됨 -- 탭하면 해제");
     }
 
     private void exitTeacherView() {
@@ -1280,6 +1335,7 @@ public class MainActivity extends ComponentActivity {
         viewingTeacherName = null;
         teacherViewLocked = false;
         teacherModeIndicator.setVisibility(View.GONE);
+        classHeaderLabel.setText(prefs.grade() + "학년 " + browseClassNum + "반 \u203a");
         rerenderAllSections();
     }
 
@@ -1929,10 +1985,18 @@ public class MainActivity extends ComponentActivity {
         LinearLayout infoCard = card();
         infoCard.addView(eyebrow("실내 지도 데이터 수집 (실험 기능)"));
         TextView desc = new TextView(this);
-        desc.setText("학교 실내 위치 지도를 만들기 위해 걸음 수와 방향, Wi-Fi 신호 세기를 백그라운드에서 항상 자동으로 기록해요 (수동으로 켜고 끄는 기능이 아니에요). 서버로 보내지 않고, 특정 인물과 연결되지 않는 익명 데이터로 이 기기에만 저장해요. 동의하지 않으면 앱을 사용할 수 없어요.");
+        desc.setText("학교 실내 위치 지도를 만들기 위해 걸음 수와 방향, Wi-Fi 신호 세기를 기록해요. 기본적으로는 학교 근처(300m 이내)에 있을 때만 자동으로 기록하고, 그 밖에서는 기록하지 않아요. 서버로 보내지 않고, 특정 인물과 연결되지 않는 익명 데이터로 이 기기에만 저장해요. 동의하지 않으면 앱을 사용할 수 없어요.");
         UiKit.styleCaption(desc);
         desc.setPadding(0, dp(6), 0, 0);
         infoCard.addView(desc);
+
+        alwaysRecordCheck = styledCheckbox("위치와 상관없이 항상 기록 (학교 위치 인식이 안 될 때 사용)");
+        LinearLayout.LayoutParams alwaysRecordLp = matchWrap();
+        alwaysRecordLp.topMargin = dp(10);
+        alwaysRecordCheck.setChecked(prefs.testMode());
+        alwaysRecordCheck.setOnCheckedChangeListener((b, checked) -> prefs.setTestMode(checked));
+        infoCard.addView(alwaysRecordCheck, alwaysRecordLp);
+
         section.addView(infoCard, cardLp());
 
         LinearLayout statusCard = card();
@@ -2513,11 +2577,18 @@ public class MainActivity extends ComponentActivity {
             return;
         }
         prefs.setSchool(pendingSchoolCode, pendingSchoolName);
+        // Also fixes indoor mapping never collecting when a school is set
+        // from here instead of first-run onboarding (the only other place
+        // this was called from): with no lat/lon ever stored, the
+        // geofence in MappingService.shouldCollect() always failed.
+        updateSchoolLocation(pendingSchoolName);
         try {
             int g = Integer.parseInt(gradeAuto.getText().toString().trim());
             int c = Integer.parseInt(classAuto.getText().toString().trim());
             prefs.setClass(g, c);
         } catch (Exception ignored) {}
+        prefs.setTeacherMode(teacherModeCheck.isChecked());
+        prefs.setTeacherName(teacherNameInput.getText().toString().trim());
         NotificationScheduler.rescheduleAll(this);
         if (prefs.liveNotify()) startForegroundService(new Intent(this, LiveNotifyService.class));
         Toast.makeText(this, "적용했어요.", Toast.LENGTH_SHORT).show();

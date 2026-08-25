@@ -143,8 +143,8 @@ public class UiKit {
     // layer, a real cost not worth paying across the dozens of cards on
     // screen at once for an effect that barely reads on a large, mostly-
     // flat surface anyway -- see MainActivity.card()'s comment. The bottom
-    // nav bar is a Compose island using the real engine instead --
-    // see LiquidGlassTabBar.kt.
+    // nav bar is a plain flat bar (MainActivity.buildBottomNav()), not
+    // shader-refracted at all -- kept simple on purpose.
     private static void attachGlassRefraction(View v) {
         LiquidGlassShader.attach(v, dpf(PILL_RADIUS_DP), dpf(18f), dpf(16f));
     }

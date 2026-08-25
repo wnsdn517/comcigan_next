@@ -781,7 +781,18 @@ public class MappingCollector {
     // position measurement whose variance (r) scales with how far its
     // nearest neighbors were in RSSI-space (a tight cluster of close
     // matches is trusted far more than a vague one). See class doc.
+    //
+    // Zero-velocity gate: updateParticlesMeasurement() resamples every
+    // particle with fresh injected noise on every call, which kept nudging
+    // posX/posY by a few centimeters even while genuinely standing still
+    // (no steps -> no real reason for the position to be moving at all,
+    // so a repeated "correction" toward slightly different noisy RSSI
+    // readings just reads as the dot jittering around in place). Skipping
+    // the correction entirely while isStationary is the standard fix
+    // (a "ZUPT" -- zero-velocity update) for this in pedestrian dead
+    // reckoning.
     private void applyFingerprintCorrection(double mx, double my, double matchDistance) {
+        if (isStationary) return;
         double std = Math.max(0.5, matchDistance * 0.1);
         updateParticlesMeasurement(mx, my, std);
         
@@ -1077,7 +1088,8 @@ public class MappingCollector {
         float h = headingDeg, p = pitchDeg, r = rollDeg;
         int steps = stepCount;
         double x = posX, y = posY;
-        dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y));
+        int floorDelta = getEstimatedFloorDelta();
+        dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y, floorDelta));
         if (listener != null) listener.onHeadingSteps(h, steps);
         persistPosition();
     }

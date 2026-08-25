@@ -1,9 +1,3 @@
 plugins {
     id 'com.android.application' version '8.5.2' apply false
-    // Kotlin is being adopted incrementally (new components only, starting
-    // with LiquidGlassBottomBar) rather than a big-bang rewrite of the
-    // existing Java code, which stays exactly as-is and keeps compiling
-    // and interoperating normally -- Java and Kotlin classes call each
-    // other directly within the same module, no bridging needed.
-    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
 }

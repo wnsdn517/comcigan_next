@@ -22,7 +22,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 6;
+    private static final int DB_VERSION = 7;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -45,7 +45,8 @@ public class MappingDb extends SQLiteOpenHelper {
                 "bssid TEXT, rssi INTEGER, freq INTEGER, x REAL, y REAL)");
         db.execSQL("CREATE TABLE motion_samples (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
-                "heading_deg REAL, pitch_deg REAL, roll_deg REAL, step_count INTEGER, x REAL, y REAL)");
+                "heading_deg REAL, pitch_deg REAL, roll_deg REAL, step_count INTEGER, x REAL, y REAL, " +
+                "floor_delta INTEGER)");
         db.execSQL("CREATE TABLE waypoints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "floor TEXT, label TEXT, x REAL, y REAL)");
@@ -135,7 +136,7 @@ public class MappingDb extends SQLiteOpenHelper {
     }
 
     public void insertMotionSample(long sessionId, long ts, float headingDeg, float pitchDeg, float rollDeg,
-                                    int stepCount, double x, double y) {
+                                    int stepCount, double x, double y, int floorDelta) {
         ContentValues cv = new ContentValues();
         cv.put("session_id", sessionId);
         cv.put("ts", ts);
@@ -145,6 +146,7 @@ public class MappingDb extends SQLiteOpenHelper {
         cv.put("step_count", stepCount);
         cv.put("x", x);
         cv.put("y", y);
+        cv.put("floor_delta", floorDelta);
         getWritableDatabase().insert("motion_samples", null, cv);
     }
 
@@ -493,17 +495,19 @@ public class MappingDb extends SQLiteOpenHelper {
         return countRows(db, "SELECT COUNT(*) FROM (SELECT DISTINCT floor, label FROM place_fingerprints)");
     }
 
-    // Chronological (x, y) trail from the most recent motion samples, for
-    // the Settings 3D path drawing. Small on-demand read, same reasoning
-    // as estimateApPositions() above.
+    // Chronological (x, y, floor) trail from the most recent motion
+    // samples, for the Settings 3D path drawing -- floor lets that view
+    // show the route's actual rise/fall instead of only ever drawing it
+    // flat. Small on-demand read, same reasoning as estimateApPositions()
+    // above.
     public List<double[]> recentPath(int limit) {
         List<double[]> out = new ArrayList<>();
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor cur = db.rawQuery(
-                "SELECT x, y FROM motion_samples ORDER BY id DESC LIMIT ?",
+                "SELECT x, y, floor_delta FROM motion_samples ORDER BY id DESC LIMIT ?",
                 new String[]{String.valueOf(limit)})) {
             while (cur.moveToNext()) {
-                out.add(new double[]{cur.getDouble(0), cur.getDouble(1)});
+                out.add(new double[]{cur.getDouble(0), cur.getDouble(1), cur.getDouble(2)});
             }
         }
         java.util.Collections.reverse(out);
@@ -519,15 +523,16 @@ public class MappingDb extends SQLiteOpenHelper {
     // opens as one sortable sheet.
     public void exportMotionCsv(java.io.Writer writer) throws java.io.IOException {
         writer.write('\uFEFF'); // Excel-friendly BOM so Hangul headers/labels don't show as mojibake
-        writer.write("type,session_id,ts,heading_deg,pitch_deg,roll_deg,step_count,x,y,floor,label\n");
+        writer.write("type,session_id,ts,heading_deg,pitch_deg,roll_deg,step_count,x,y,floor_delta,floor,label\n");
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor cur = db.rawQuery(
-                "SELECT session_id, ts, heading_deg, pitch_deg, roll_deg, step_count, x, y " +
+                "SELECT session_id, ts, heading_deg, pitch_deg, roll_deg, step_count, x, y, floor_delta " +
                         "FROM motion_samples ORDER BY session_id, ts", null)) {
             while (cur.moveToNext()) {
                 writer.write(csvRow("motion", cur.getLong(0), cur.getLong(1),
                         String.valueOf(cur.getFloat(2)), String.valueOf(cur.getFloat(3)), String.valueOf(cur.getFloat(4)),
-                        String.valueOf(cur.getInt(5)), cur.getDouble(6), cur.getDouble(7), "", ""));
+                        String.valueOf(cur.getInt(5)), cur.getDouble(6), cur.getDouble(7),
+                        String.valueOf(cur.getInt(8)), "", ""));
             }
         }
         try (Cursor cur = db.rawQuery(
@@ -535,15 +540,15 @@ public class MappingDb extends SQLiteOpenHelper {
             while (cur.moveToNext()) {
                 writer.write(csvRow("waypoint", cur.getLong(0), cur.getLong(1),
                         "", "", "", "", cur.getDouble(4), cur.getDouble(5),
-                        cur.getString(2), cur.getString(3)));
+                        "", cur.getString(2), cur.getString(3)));
             }
         }
     }
 
     private static String csvRow(String type, long sessionId, long ts, String heading, String pitch, String roll,
-                                  String stepCount, double x, double y, String floor, String label) {
+                                  String stepCount, double x, double y, String floorDelta, String floor, String label) {
         return String.join(",", type, String.valueOf(sessionId), String.valueOf(ts), heading, pitch, roll,
-                stepCount, String.valueOf(x), String.valueOf(y), csvEscape(floor), csvEscape(label)) + "\n";
+                stepCount, String.valueOf(x), String.valueOf(y), csvEscape(floorDelta), csvEscape(floor), csvEscape(label)) + "\n";
     }
 
     private static String csvEscape(String s) {

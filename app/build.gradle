@@ -1,6 +1,5 @@
 plugins {
     id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
 }
 
 // Release signing: if a keystore is provided via environment variables
@@ -64,41 +63,7 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-
-    kotlinOptions {
-        jvmTarget = '17'
-    }
-
-    // Compose is used only for the bottom tab bar's layout/animation (a
-    // small ComposeView island inside the otherwise-Java view tree -- see
-    // MainActivity.buildBottomNav() / LiquidGlassTabBar.kt). Its glass
-    // effect is the real AGSL shader in LiquidGlassShader.java driven
-    // through Modifier.graphicsLayer, not Kyant0's published multiplatform
-    // library -- every version of that library requires compileSdk 36+
-    // (2.0.0 needs 37, needing Android Gradle Plugin 9.x), which is a much
-    // larger toolchain migration than this app's build currently takes on.
-    buildFeatures {
-        compose true
-    }
-    composeOptions {
-        // Paired with the Kotlin 1.9.24 compiler above -- see
-        // https://developer.android.com/jetpack/androidx/releases/compose-kotlin
-        kotlinCompilerExtensionVersion '1.5.14'
-    }
 }
 
 dependencies {
-    implementation 'org.jetbrains.kotlin:kotlin-stdlib:1.9.24'
-
-    // 2024.09.00 (Compose UI 1.7.0), not the newest BOM available: it's the
-    // first release with the native rememberGraphicsLayer()/drawLayer()
-    // capture API the tab bar's real backdrop refraction needs (see
-    // LiquidGlassTabBar.kt), picked specifically to stay clear of the
-    // compileSdk 35/36/37 + AGP 8.6/9.x bumps later Compose/library
-    // releases start requiring (see the other comment above).
-    implementation platform('androidx.compose:compose-bom:2024.09.00')
-    implementation 'androidx.compose.ui:ui'
-    implementation 'androidx.compose.foundation:foundation'
-    implementation 'androidx.compose.animation:animation'
-    implementation 'androidx.activity:activity:1.9.0'
 }

@@ -31,10 +31,7 @@ import android.view.View;
 // this design system already uses.
 public class LiquidGlassShader {
 
-    // Package-visible (not private): LiquidGlassTabBar.kt reuses this exact
-    // same verbatim shader string for the Compose-hosted sliding tab
-    // indicator via buildRenderEffect() below, instead of duplicating it.
-    static final String REFRACTION_AGSL =
+    private static final String REFRACTION_AGSL =
             "uniform shader content;\n" +
             "\n" +
             "uniform float2 size;\n" +
@@ -109,19 +106,6 @@ public class LiquidGlassShader {
     }
 
     private static void apply(View view, int w, int h, float cornerRadiusPx, float refractionHeightPx, float refractionAmountPx) {
-        RenderEffect effect = buildRenderEffect(w, h, cornerRadiusPx, refractionHeightPx, refractionAmountPx);
-        if (effect != null) view.setRenderEffect(effect);
-    }
-
-    // Same shader/uniform setup as apply() above, factored out so
-    // LiquidGlassTabBar.kt's Compose-hosted sliding indicator can drive the
-    // identical real effect through Modifier.graphicsLayer's renderEffect
-    // (via android.graphics.RenderEffect.asComposeRenderEffect()) instead
-    // of View.setRenderEffect(). Returns null on API<33 or any driver
-    // failure -- callers just leave their normal fill in place then.
-    public static RenderEffect buildRenderEffect(int w, int h, float cornerRadiusPx, float refractionHeightPx, float refractionAmountPx) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null;
-        if (w <= 0 || h <= 0) return null;
         try {
             RuntimeShader rs = new RuntimeShader(REFRACTION_AGSL);
             rs.setFloatUniform("size", (float) w, (float) h);
@@ -138,11 +122,10 @@ public class LiquidGlassShader {
             rs.setFloatUniform("refractionHeight", refractionHeightPx);
             rs.setFloatUniform("refractionAmount", refractionAmountPx);
             rs.setFloatUniform("depthEffect", 0.3f);
-            return RenderEffect.createRuntimeShaderEffect(rs, "content");
+            view.setRenderEffect(RenderEffect.createRuntimeShaderEffect(rs, "content"));
         } catch (Exception ignored) {
             // A driver/device quirk here just leaves UiKit's flat
             // translucent+sheen look in place -- never worth crashing over.
-            return null;
         }
     }
 }

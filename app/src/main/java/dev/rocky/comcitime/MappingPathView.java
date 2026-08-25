@@ -11,18 +11,27 @@ import java.util.ArrayList;
 import java.util.List;
 
 // Draws the dead-reckoned movement path (x/y meters from the session's
-// starting point) as an isometric "3D-looking" floor plan -- the closest
-// a flat Canvas gets to an actual 3D plot without pulling in a GL
-// dependency for one small debug view. See MappingCollector for how the
-// path itself is computed (steps x heading, not typed in by hand), and
-// MappingDb.estimateApPositions for the Wi-Fi AP position estimates
-// plotted alongside it. One finger dragged left/right spins the view
-// around the vertical axis (userYawDeg); two fingers dragged up/down tilt
-// the elevation angle (userPitchDeg); three fingers dragged in any
-// direction pan the view (userPanX/userPanY) and pinched apart/together
-// zoom it (userZoom). resetView() (wired to a "현위치 보기" button in
-// MainActivity) snaps all four back to their defaults.
+// starting point, plus a barometer-derived floor/z at each point) as an
+// isometric "3D-looking" floor plan -- the closest a flat Canvas gets to
+// an actual 3D plot without pulling in a GL dependency for one small
+// debug view. See MappingCollector for how the path itself is computed
+// (steps x heading, not typed in by hand), and MappingDb.estimateApPositions
+// for the Wi-Fi AP position estimates plotted alongside it. One finger
+// dragged left/right spins the view around the vertical axis (userYawDeg);
+// two fingers dragged up/down tilt the elevation angle (userPitchDeg);
+// three fingers dragged in any direction pan the view (userPanX/userPanY)
+// and pinched apart/together zoom it (userZoom). resetView() (wired to a
+// "현위치 보기" button in MainActivity) snaps all four back to their
+// defaults.
 public class MappingPathView extends View {
+
+    // Meters of vertical extrusion per floor of estimated change -- z is a
+    // real third axis in isoCoords()/project() below (it rotates/tilts/
+    // zooms along with x and y, unlike an earlier version of this view
+    // that only ever bolted a fixed-pixel riser onto the current-position
+    // dot). A typical school floor-to-floor height, so the extrusion reads
+    // at a sensible scale against the 1-meter floor grid.
+    private static final double METERS_PER_FLOOR = 3.5;
 
     private List<double[]> path = new ArrayList<>();
     private double curX = 0, curY = 0;
@@ -63,10 +72,6 @@ public class MappingPathView extends View {
     private final Paint emptyPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint floorUpPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint floorDownPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    // Vertical screen distance drawn per floor of estimated change -- see
-    // drawElevatedPosition(). Tuned to read clearly against the 1-meter
-    // floor grid without dwarfing it.
-    private static final int FLOOR_HEIGHT_DP = 22;
 
     public MappingPathView(Context ctx) {
         super(ctx);
@@ -92,6 +97,7 @@ public class MappingPathView extends View {
         floorDownPaint.setStrokeWidth(UiKit.dp(2));
     }
 
+    // Each path point is {x, y, floorDelta} -- see MappingDb.recentPath().
     public void setPath(List<double[]> path, double curX, double curY) {
         this.path = path != null ? path : new ArrayList<>();
         this.curX = curX;
@@ -270,9 +276,11 @@ public class MappingPathView extends View {
         }
 
         double minX = curX, maxX = curX, minY = curY, maxY = curY;
+        double minZ = Math.min(0, floorDelta), maxZ = Math.max(0, floorDelta);
         for (double[] p : path) {
             minX = Math.min(minX, p[0]); maxX = Math.max(maxX, p[0]);
             minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]);
+            if (p.length > 2) { minZ = Math.min(minZ, p[2]); maxZ = Math.max(maxZ, p[2]); }
         }
         for (MappingDb.ApEstimate ap : apEstimates) {
             minX = Math.min(minX, ap.x); maxX = Math.max(maxX, ap.x);
@@ -282,20 +290,23 @@ public class MappingPathView extends View {
         minY = Math.min(minY, 0); maxY = Math.max(maxY, 0);
         double midX = (minX + maxX) / 2, midY = (minY + maxY) / 2;
 
-        // Fit scale from the projected bounding box of the four corners,
-        // so the whole path stays on-screen regardless of how far it's
-        // wandered from the origin -- computed at the CURRENT yaw/pitch
-        // (via isoCoords()) so rotating/tilting the view never clips
-        // content that was on-screen before the gesture. userZoom is
-        // applied afterward, as an explicit override on top of this fit,
-        // not folded into it.
+        // Fit scale from the projected bounding box of the four corners
+        // (crossed with the min/max floor seen, so a route that changed
+        // floors isn't clipped vertically), so the whole path stays
+        // on-screen regardless of how far it's wandered from the origin
+        // -- computed at the CURRENT yaw/pitch (via isoCoords()) so
+        // rotating/tilting the view never clips content that was
+        // on-screen before the gesture. userZoom is applied afterward, as
+        // an explicit override on top of this fit, not folded into it.
         double isoMinX = Double.MAX_VALUE, isoMaxX = -Double.MAX_VALUE;
         double isoMinY = Double.MAX_VALUE, isoMaxY = -Double.MAX_VALUE;
         double[][] corners = {{minX, minY}, {minX, maxY}, {maxX, minY}, {maxX, maxY}};
         for (double[] c : corners) {
-            double[] iso = isoCoords(c[0], c[1], midX, midY);
-            isoMinX = Math.min(isoMinX, iso[0]); isoMaxX = Math.max(isoMaxX, iso[0]);
-            isoMinY = Math.min(isoMinY, iso[1]); isoMaxY = Math.max(isoMaxY, iso[1]);
+            for (double z : new double[]{minZ, maxZ}) {
+                double[] iso = isoCoords(c[0], c[1], z, midX, midY);
+                isoMinX = Math.min(isoMinX, iso[0]); isoMaxX = Math.max(isoMaxX, iso[0]);
+                isoMinY = Math.min(isoMinY, iso[1]); isoMaxY = Math.max(isoMaxY, iso[1]);
+            }
         }
         double spanIsoX = Math.max(1, isoMaxX - isoMinX);
         double spanIsoY = Math.max(1, isoMaxY - isoMinY);
@@ -304,53 +315,47 @@ public class MappingPathView extends View {
 
         float cx = w / 2f, cy = h / 2f;
 
-        // Faint isometric floor grid every meter, for a sense of scale/depth.
+        // Faint isometric floor grid every meter (at z=0, ground level),
+        // for a sense of scale/depth.
         int gridExtent = (int) Math.min(40, Math.ceil(Math.max(maxX - minX, maxY - minY) / 2) + 2);
         for (int i = -gridExtent; i <= gridExtent; i++) {
-            drawIsoLine(canvas, i, -gridExtent, i, gridExtent, cx, cy, scale, midX, midY, gridPaint);
-            drawIsoLine(canvas, -gridExtent, i, gridExtent, i, cx, cy, scale, midX, midY, gridPaint);
+            drawIsoLine(canvas, i, -gridExtent, i, gridExtent, 0, cx, cy, scale, midX, midY, gridPaint);
+            drawIsoLine(canvas, -gridExtent, i, gridExtent, i, 0, cx, cy, scale, midX, midY, gridPaint);
         }
 
         float prevSx = 0, prevSy = 0;
         boolean first = true;
         for (double[] p : path) {
-            float[] s = project(p[0], p[1], cx, cy, scale, midX, midY);
+            double z = p.length > 2 ? p[2] : 0;
+            float[] s = project(p[0], p[1], z, cx, cy, scale, midX, midY);
             if (!first) canvas.drawLine(prevSx, prevSy, s[0], s[1], pathPaint);
             prevSx = s[0]; prevSy = s[1];
             first = false;
         }
 
         for (MappingDb.ApEstimate ap : apEstimates) {
-            float[] s = project(ap.x, ap.y, cx, cy, scale, midX, midY);
+            float[] s = project(ap.x, ap.y, 0, cx, cy, scale, midX, midY);
             drawDiamond(canvas, s[0], s[1], UiKit.dp(6), apPaint);
         }
 
-        float[] origin = project(0, 0, cx, cy, scale, midX, midY);
+        float[] origin = project(0, 0, 0, cx, cy, scale, midX, midY);
         canvas.drawCircle(origin[0], origin[1], UiKit.dp(5), originPaint);
 
-        float[] cur = project(curX, curY, cx, cy, scale, midX, midY);
+        float[] curGround = project(curX, curY, 0, cx, cy, scale, midX, midY);
         if (floorDelta != 0) {
-            drawElevatedPosition(canvas, cur[0], cur[1]);
+            float[] curElevated = project(curX, curY, floorDelta, cx, cy, scale, midX, midY);
+            // A faint ring stays at ground level as a shadow reference, a
+            // riser line climbs (or drops) to the real position dot at its
+            // actual floor -- both ends now driven by the same 3D
+            // projection as everything else, so this riser rotates/tilts/
+            // zooms consistently with the rest of the view.
+            canvas.drawCircle(curGround[0], curGround[1], UiKit.dp(4), originPaint);
+            canvas.drawLine(curGround[0], curGround[1], curElevated[0], curElevated[1],
+                    floorDelta > 0 ? floorUpPaint : floorDownPaint);
+            canvas.drawCircle(curElevated[0], curElevated[1], UiKit.dp(7), curPaint);
         } else {
-            canvas.drawCircle(cur[0], cur[1], UiKit.dp(7), curPaint);
+            canvas.drawCircle(curGround[0], curGround[1], UiKit.dp(7), curPaint);
         }
-    }
-
-    // Renders floor change as actual vertical displacement in the
-    // isometric space, the way an isometric game shows height, instead of
-    // a flat badge/number bolted onto a 2D dot: a faint ring stays at
-    // ground level (cur[0], cur[1]) as a shadow reference, a riser line
-    // climbs (or drops) from it by floorDelta floors, and the real
-    // position dot sits at the far end of that riser -- so "went up two
-    // floors" reads as the dot visibly floating two floor-heights above
-    // its own ground shadow, not as a "+2" label.
-    private void drawElevatedPosition(Canvas canvas, float groundX, float groundY) {
-        boolean up = floorDelta > 0;
-        float riserPx = Math.abs(floorDelta) * UiKit.dp(FLOOR_HEIGHT_DP);
-        float elevatedY = up ? groundY - riserPx : groundY + riserPx;
-        canvas.drawCircle(groundX, groundY, UiKit.dp(4), originPaint);
-        canvas.drawLine(groundX, groundY, groundX, elevatedY, up ? floorUpPaint : floorDownPaint);
-        canvas.drawCircle(groundX, elevatedY, UiKit.dp(7), curPaint);
     }
 
     private void drawDiamond(Canvas canvas, float cx, float cy, float r, Paint paint) {
@@ -363,41 +368,46 @@ public class MappingPathView extends View {
         canvas.drawPath(diamond, paint);
     }
 
-    // Unscaled isometric (x, y) for one world point, at the current view
-    // rotation (userYawDeg) and elevation (userPitchDeg). At the defaults
-    // (yaw=0, pitch=0) this is exactly the original fixed formula:
-    // rotating (dx, dy) by 45 degrees gives ((dx-dy), (dx+dy)) * cos(45),
-    // and the 1.22474/0.70711 factors (sqrt(1.5) and 1/sqrt(2) = sin(45))
-    // are the same fixed horizontal-stretch/vertical-squash that made
-    // that look isometric. Elevation only varies the vertical squash
+    // Unscaled isometric (x, y) for one world point at height z (floors),
+    // at the current view rotation (userYawDeg) and elevation
+    // (userPitchDeg). At the defaults (yaw=0, pitch=0, z=0) this is
+    // exactly the original fixed formula: rotating (dx, dy) by 45 degrees
+    // gives ((dx-dy), (dx+dy)) * cos(45), and the 1.22474/0.70711 factors
+    // (sqrt(1.5) and 1/sqrt(2) = sin(45)) are the same fixed horizontal-
+    // stretch/vertical-squash that made that look isometric. Elevation
+    // varies the vertical squash of BOTH the horizontal-plane component
     // (sin of the elevation angle: 90 degrees = flat top-down, no squash;
-    // smaller = more edge-on) -- horizontal spacing stays fixed regardless
-    // of tilt, a common simplification in 2.5D renderers.
-    private double[] isoCoords(double x, double y, double midX, double midY) {
+    // smaller = more edge-on) and how much height shows on screen (cos of
+    // the same angle: edge-on shows height fully, top-down flattens it to
+    // nothing) -- the same relationship a real isometric drawing has
+    // between its ground plane and vertical axis. Horizontal spacing
+    // itself stays fixed regardless of tilt, a common simplification in
+    // 2.5D renderers.
+    private double[] isoCoords(double x, double y, double z, double midX, double midY) {
         double dx = x - midX, dy = y - midY;
         double theta = Math.toRadians(45 + userYawDeg);
         double rx = dx * Math.cos(theta) - dy * Math.sin(theta);
         double ry = dx * Math.sin(theta) + dy * Math.cos(theta);
-        double elevationDeg = clamp((float) (45 + userPitchDeg), 5f, 89f);
+        double elevationRad = Math.toRadians(clamp((float) (45 + userPitchDeg), 5f, 89f));
         double isoX = rx * 1.22474; // sqrt(1.5)
-        double isoY = ry * Math.sin(Math.toRadians(elevationDeg));
+        double isoY = ry * Math.sin(elevationRad) - z * METERS_PER_FLOOR * Math.cos(elevationRad);
         return new double[]{isoX, isoY};
     }
 
     // Final screen pixels for one world point: the rotated/tilted
     // isoCoords() above, scaled by the auto-fit `scale` times the user's
     // pinch-zoom (userZoom), then panned in screen space by userPanX/userPanY.
-    private float[] project(double x, double y, float cx, float cy, double scale, double midX, double midY) {
-        double[] iso = isoCoords(x, y, midX, midY);
+    private float[] project(double x, double y, double z, float cx, float cy, double scale, double midX, double midY) {
+        double[] iso = isoCoords(x, y, z, midX, midY);
         float sx = (float) (cx + iso[0] * scale * userZoom) + userPanX;
         float sy = (float) (cy + iso[1] * scale * userZoom) + userPanY;
         return new float[]{sx, sy};
     }
 
-    private void drawIsoLine(Canvas canvas, double x1, double y1, double x2, double y2,
+    private void drawIsoLine(Canvas canvas, double x1, double y1, double x2, double y2, double z,
                               float cx, float cy, double scale, double midX, double midY, Paint paint) {
-        float[] a = project(x1, y1, cx, cy, scale, midX, midY);
-        float[] b = project(x2, y2, cx, cy, scale, midX, midY);
+        float[] a = project(x1, y1, z, cx, cy, scale, midX, midY);
+        float[] b = project(x2, y2, z, cx, cy, scale, midX, midY);
         canvas.drawLine(a[0], a[1], b[0], b[1], paint);
     }
 }
