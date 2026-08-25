@@ -22,7 +22,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 9;
+    private static final int DB_VERSION = 10;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -94,7 +94,17 @@ public class MappingDb extends SQLiteOpenHelper {
                 "accel_x REAL, accel_y REAL, accel_z REAL, " +
                 "gyro_x REAL, gyro_y REAL, gyro_z REAL, " +
                 "mag_x REAL, mag_y REAL, mag_z REAL, " +
-                "pressure_hpa REAL, top_rssi INTEGER)");
+                "pressure_hpa REAL, top_rssi INTEGER, " +
+                // Platform-fused gravity-only vector and gravity-compensated
+                // linear acceleration (TYPE_GRAVITY/TYPE_LINEAR_ACCELERATION),
+                // alongside the raw accel_x/y/z above -- lets a suspected
+                // device-tilt-related step-detection bug (raw accelerometer
+                // magnitude conflating real motion with an orientation-
+                // dependent gravity component) actually be verified against
+                // real recorded data instead of guessed at. See
+                // MappingCollector's class doc.
+                "grav_x REAL, grav_y REAL, grav_z REAL, " +
+                "lin_accel_x REAL, lin_accel_y REAL, lin_accel_z REAL)");
         db.execSQL("CREATE TABLE IF NOT EXISTS waypoints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "floor TEXT, label TEXT, x REAL, y REAL)");
@@ -157,6 +167,12 @@ public class MappingDb extends SQLiteOpenHelper {
         addColumnIfMissing(db, "motion_samples", "top_rssi", "INTEGER");
         addColumnIfMissing(db, "place_fingerprints", "x", "REAL");
         addColumnIfMissing(db, "place_fingerprints", "y", "REAL");
+        addColumnIfMissing(db, "motion_samples", "grav_x", "REAL");
+        addColumnIfMissing(db, "motion_samples", "grav_y", "REAL");
+        addColumnIfMissing(db, "motion_samples", "grav_z", "REAL");
+        addColumnIfMissing(db, "motion_samples", "lin_accel_x", "REAL");
+        addColumnIfMissing(db, "motion_samples", "lin_accel_y", "REAL");
+        addColumnIfMissing(db, "motion_samples", "lin_accel_z", "REAL");
     }
 
     // ALTER TABLE ADD COLUMN has no IF NOT EXISTS in the SQLite versions
@@ -232,7 +248,9 @@ public class MappingDb extends SQLiteOpenHelper {
                                     float accelX, float accelY, float accelZ,
                                     float gyroX, float gyroY, float gyroZ,
                                     float magX, float magY, float magZ,
-                                    float pressureHpa, int topRssi) {
+                                    float pressureHpa, int topRssi,
+                                    float gravX, float gravY, float gravZ,
+                                    float linAccelX, float linAccelY, float linAccelZ) {
         ContentValues cv = new ContentValues();
         cv.put("session_id", sessionId);
         cv.put("ts", ts);
@@ -248,6 +266,8 @@ public class MappingDb extends SQLiteOpenHelper {
         cv.put("mag_x", magX); cv.put("mag_y", magY); cv.put("mag_z", magZ);
         cv.put("pressure_hpa", pressureHpa);
         cv.put("top_rssi", topRssi);
+        cv.put("grav_x", gravX); cv.put("grav_y", gravY); cv.put("grav_z", gravZ);
+        cv.put("lin_accel_x", linAccelX); cv.put("lin_accel_y", linAccelY); cv.put("lin_accel_z", linAccelZ);
         getWritableDatabase().insert("motion_samples", null, cv);
     }
 
@@ -697,11 +717,13 @@ public class MappingDb extends SQLiteOpenHelper {
     public void exportMotionCsv(java.io.Writer writer) throws java.io.IOException {
         writer.write('\uFEFF'); // Excel-friendly BOM so Hangul headers/labels don't show as mojibake
         writer.write("type,session_id,ts,heading_deg,pitch_deg,roll_deg,step_count,x,y,floor_delta," +
-                "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z,pressure_hpa,top_rssi,floor,label\n");
+                "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z,pressure_hpa,top_rssi," +
+                "grav_x,grav_y,grav_z,lin_accel_x,lin_accel_y,lin_accel_z,floor,label\n");
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor cur = db.rawQuery(
                 "SELECT session_id, ts, heading_deg, pitch_deg, roll_deg, step_count, x, y, floor_delta, " +
-                        "accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z, pressure_hpa, top_rssi " +
+                        "accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z, pressure_hpa, top_rssi, " +
+                        "grav_x, grav_y, grav_z, lin_accel_x, lin_accel_y, lin_accel_z " +
                         "FROM motion_samples ORDER BY session_id, ts", null)) {
             while (cur.moveToNext()) {
                 writer.write(csvRow("motion", cur.getLong(0), cur.getLong(1),
@@ -712,6 +734,8 @@ public class MappingDb extends SQLiteOpenHelper {
                         String.valueOf(cur.getFloat(12)), String.valueOf(cur.getFloat(13)), String.valueOf(cur.getFloat(14)),
                         String.valueOf(cur.getFloat(15)), String.valueOf(cur.getFloat(16)), String.valueOf(cur.getFloat(17)),
                         String.valueOf(cur.getFloat(18)), String.valueOf(cur.getInt(19)),
+                        String.valueOf(cur.getFloat(20)), String.valueOf(cur.getFloat(21)), String.valueOf(cur.getFloat(22)),
+                        String.valueOf(cur.getFloat(23)), String.valueOf(cur.getFloat(24)), String.valueOf(cur.getFloat(25)),
                         "", ""));
             }
         }
@@ -721,6 +745,7 @@ public class MappingDb extends SQLiteOpenHelper {
                 writer.write(csvRow("waypoint", cur.getLong(0), cur.getLong(1),
                         "", "", "", "", cur.getDouble(4), cur.getDouble(5),
                         "", "", "", "", "", "", "", "", "", "", "", "",
+                        "", "", "", "", "", "",
                         cur.getString(2), cur.getString(3)));
             }
         }
@@ -731,13 +756,18 @@ public class MappingDb extends SQLiteOpenHelper {
                                   String accelX, String accelY, String accelZ,
                                   String gyroX, String gyroY, String gyroZ,
                                   String magX, String magY, String magZ,
-                                  String pressureHpa, String topRssi, String floor, String label) {
+                                  String pressureHpa, String topRssi,
+                                  String gravX, String gravY, String gravZ,
+                                  String linAccelX, String linAccelY, String linAccelZ,
+                                  String floor, String label) {
         return String.join(",", type, String.valueOf(sessionId), String.valueOf(ts), heading, pitch, roll,
                 stepCount, String.valueOf(x), String.valueOf(y), csvEscape(floorDelta),
                 csvEscape(accelX), csvEscape(accelY), csvEscape(accelZ),
                 csvEscape(gyroX), csvEscape(gyroY), csvEscape(gyroZ),
                 csvEscape(magX), csvEscape(magY), csvEscape(magZ),
                 csvEscape(pressureHpa), csvEscape(topRssi),
+                csvEscape(gravX), csvEscape(gravY), csvEscape(gravZ),
+                csvEscape(linAccelX), csvEscape(linAccelY), csvEscape(linAccelZ),
                 csvEscape(floor), csvEscape(label)) + "\n";
     }
 

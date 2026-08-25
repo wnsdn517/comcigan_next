@@ -72,16 +72,23 @@ import java.util.concurrent.Executors;
 // direction source (see the TYPE_ROTATION_VECTOR case and applyStep()'s
 // dirDeg selection) until the compass is trustworthy again.
 //
-// Steps themselves come from a custom accelerometer peak-detector
+// Steps themselves come from a custom peak-detector
 // (processCustomStepDetection()) instead of the platform's hardware
 // TYPE_STEP_DETECTOR, which on many devices has a noticeable detection
 // lag -- the custom detector fires the instant a step's peak crosses
 // threshold, so the position update tracks actual footfalls more
 // closely. A lightweight zero-velocity-style stationary detector
-// (processStationaryDetection(), based on short-window accelerometer
-// variance) also lets heading correction pull faster toward the compass
-// while the phone is known to be still, when a compass reading isn't
-// being muddied by step-related vibration.
+// (processStationaryDetection(), based on short-window variance) also lets
+// heading correction pull faster toward the compass while the phone is
+// known to be still, when a compass reading isn't being muddied by
+// step-related vibration. Both are driven off TYPE_LINEAR_ACCELERATION
+// (the platform's own gravity-compensated acceleration, via its sensor
+// fusion using the device's actual current attitude), not the raw
+// accelerometer -- an earlier version used raw accel magnitude minus a
+// fixed 9.81 gravity constant, which silently assumed the phone was lying
+// flat and inflated apparent motion for real vertical hand movement
+// whenever the phone was actually held near-vertical instead (a common
+// in-hand carry angle).
 //
 // The resulting trajectory only needs to be locally consistent, not
 // metrically perfect: every Wi-Fi scan is tagged with the position dead
@@ -320,6 +327,11 @@ public class MappingCollector {
     // check below -- see that method's doc for why the raw accelerometer
     // isn't actually gravity while walking.
     private float gravityX, gravityY, gravityZ;
+    // Platform-fused, gravity-compensated acceleration (TYPE_LINEAR_
+    // ACCELERATION) -- drives processStationaryDetection()/
+    // processCustomStepDetection() instead of the raw accelerometer, see
+    // class doc for why.
+    private float linAccelX, linAccelY, linAccelZ, linAccelMag = 0f;
     private float pressureHpa = 0f, refPressureHpa = 0f;
     private int lastTopRssi = -120;
     private int screenRotationDeg = -1;
@@ -396,21 +408,29 @@ public class MappingCollector {
                 case Sensor.TYPE_STEP_DETECTOR:
                     // Position updates now come from the custom low-latency
                     // peak detector in processCustomStepDetection() (driven
-                    // off TYPE_ACCELEROMETER below), not this hardware
+                    // off TYPE_LINEAR_ACCELERATION below), not this hardware
                     // event -- kept registered only so a device without a
                     // usable accelerometer stream still has a step source,
                     // but not counted here to avoid double-counting steps.
                     break;
                 case Sensor.TYPE_ACCELEROMETER:
+                    // Raw magnitude (accelMag) is kept only for
+                    // estimateStepLength()'s Weinberg amplitude (accelMinInStep/
+                    // accelMaxInStep) -- triggering/stationary detection moved
+                    // to TYPE_LINEAR_ACCELERATION below, see class doc.
                     accelX = event.values[0]; accelY = event.values[1]; accelZ = event.values[2];
                     accelMag = vectorMag(event.values);
                     accelMinInStep = Math.min(accelMinInStep, accelMag);
                     accelMaxInStep = Math.max(accelMaxInStep, accelMag);
+                    break;
+                case Sensor.TYPE_LINEAR_ACCELERATION:
+                    linAccelX = event.values[0]; linAccelY = event.values[1]; linAccelZ = event.values[2];
+                    linAccelMag = vectorMag(event.values);
                     // Stationary detection runs first so processCustomStepDetection()
                     // below sees isStationary for *this* sample, not the
                     // previous one.
-                    processStationaryDetection(accelMag);
-                    processCustomStepDetection(accelMag);
+                    processStationaryDetection(linAccelMag);
+                    processCustomStepDetection(linAccelMag);
                     break;
                 case Sensor.TYPE_GYROSCOPE:
                     gyroX = event.values[0]; gyroY = event.values[1]; gyroZ = event.values[2];
@@ -530,13 +550,26 @@ public class MappingCollector {
         return Math.max(0.3, Math.min(1.0, len));
     }
 
-    // Fires the moment the accelerometer magnitude's swing away from
-    // gravity crosses PEAK_THRESHOLD, then waits for it to fall back
-    // before searching for the next peak -- lower latency than the
-    // platform's hardware step detector, which on many devices only
-    // reports a step some tens to hundreds of ms after it actually
-    // happened. STEP_COOLDOWN_MS guards against a single footfall's
-    // vibration registering as more than one step.
+    // Fires the moment the linear-acceleration magnitude (real motion,
+    // gravity already removed by the platform's own fusion -- see class
+    // doc) crosses PEAK_THRESHOLD, then waits for it to fall back before
+    // searching for the next peak -- lower latency than the platform's
+    // hardware step detector, which on many devices only reports a step
+    // some tens to hundreds of ms after it actually happened.
+    // STEP_COOLDOWN_MS guards against a single footfall's vibration
+    // registering as more than one step.
+    //
+    // This used to run off the RAW accelerometer's magnitude minus a fixed
+    // 9.81 gravity constant, which quietly assumed gravity always
+    // contributes exactly that much to the magnitude regardless of how the
+    // phone is held -- true only for a phone lying flat. Held near-vertical
+    // (typical in-hand carry) with real vertical hand motion, that fixed
+    // subtraction doesn't track the actual dynamic swing correctly and
+    // reported inflated "movement" even for motion that wasn't real
+    // forward walking. TYPE_LINEAR_ACCELERATION is the platform's own
+    // gravity-compensated acceleration (computed via sensor fusion using
+    // the actual current device attitude, not a flat-phone assumption), so
+    // switching to it fixes this regardless of how the phone is oriented.
     //
     // !isStationary is required too: the class doc's rhythm-consistency
     // confirmation (see MAX_STEP_INTERVAL_MS above) assumes an isolated
@@ -545,21 +578,19 @@ public class MappingCollector {
     // (hand tremor, breathing, shifting grip) that crossed PEAK_THRESHOLD
     // often enough to fool that check, walking the dead-reckoned position
     // steadily forward the whole time it was held. isStationary is
-    // computed from the same accelerometer sample just above (in
+    // computed from the same linear-acceleration sample just above (in
     // onSensorChanged, stationary detection deliberately runs first) as a
-    // short-window variance -- genuine walking's accelerometer swing
+    // short-window variance -- genuine walking's acceleration swing
     // reliably drives that variance well past STATIONARY_THRESHOLD, so
     // gating on it filters out exactly this kind of held-still jitter
     // without touching real steps.
-    private void processCustomStepDetection(float mag) {
+    private void processCustomStepDetection(float linAccelMagnitude) {
         long now = System.currentTimeMillis();
-        float gravity = 9.81f;
-        float relativeMag = Math.abs(mag - gravity);
 
-        if (peakSearching && relativeMag > PEAK_THRESHOLD && !isStationary && (now - lastStepTimeMs) > STEP_COOLDOWN_MS) {
+        if (peakSearching && linAccelMagnitude > PEAK_THRESHOLD && !isStationary && (now - lastStepTimeMs) > STEP_COOLDOWN_MS) {
             onPeakDetected(now);
             peakSearching = false;
-        } else if (!peakSearching && relativeMag < PEAK_THRESHOLD / 2) {
+        } else if (!peakSearching && linAccelMagnitude < PEAK_THRESHOLD / 2) {
             peakSearching = true;
         }
     }
@@ -632,13 +663,22 @@ public class MappingCollector {
         recordMotionSample();
     }
 
-    // Zero-velocity-style stationary check: true once the accelerometer
-    // magnitude's variance over a short rolling window drops below
-    // STATIONARY_THRESHOLD, i.e. the phone isn't actively bouncing with
-    // footsteps. Feeds HEADING_COMPASS_PULL_STATIONARY above; a confirmed
-    // step (applyStep()) always forces this back to false immediately --
-    // a merely-pending, unconfirmed peak deliberately does not, so an
-    // isolated jolt can't fake "walking" here either.
+    // Zero-velocity-style stationary check: true once the linear-
+    // acceleration magnitude's variance over a short rolling window drops
+    // below STATIONARY_THRESHOLD, i.e. the phone isn't actively bouncing
+    // with footsteps. Feeds HEADING_COMPASS_PULL_STATIONARY above; a
+    // confirmed step (applyStep()) always forces this back to false
+    // immediately -- a merely-pending, unconfirmed peak deliberately does
+    // not, so an isolated jolt can't fake "walking" here either.
+    // STATIONARY_THRESHOLD was originally tuned against raw-accelerometer-
+    // magnitude variance (baseline ~9.81 m/s^2); now fed linear-
+    // acceleration magnitude (baseline ~0) instead -- see class doc.
+    // Variance is computed around the window's own mean either way, so a
+    // constant baseline shift alone doesn't change it, but the platform's
+    // linear-acceleration fusion is itself somewhat filtered/smoothed
+    // compared to a raw accelerometer stream, so this threshold may need
+    // re-tuning if real recorded data shows stationary detection behaving
+    // differently now.
     private void processStationaryDetection(float mag) {
         accelWindow[accelWindowIdx] = mag;
         accelWindowIdx = (accelWindowIdx + 1) % accelWindow.length;
@@ -988,6 +1028,7 @@ public class MappingCollector {
         registerIfAvailable(Sensor.TYPE_MAGNETIC_FIELD);
         registerIfAvailable(Sensor.TYPE_PRESSURE);
         registerIfAvailable(Sensor.TYPE_GRAVITY);
+        registerIfAvailable(Sensor.TYPE_LINEAR_ACCELERATION);
 
         orientationEventListener = new OrientationEventListener(ctx) {
             @Override
@@ -1282,8 +1323,14 @@ public class MappingCollector {
         float mX = magX, mY = magY, mZ = magZ;
         float pressure = pressureHpa;
         int rssi = lastTopRssi;
+        // Also gravX/Y/Z and linAccelX/Y/Z -- see class doc: lets a
+        // suspected device-tilt-dependent step-detection bug actually be
+        // verified against real data instead of guessed at.
+        float gvX = gravityX, gvY = gravityY, gvZ = gravityZ;
+        float laX = linAccelX, laY = linAccelY, laZ = linAccelZ;
         dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y, floorDelta,
-                aX, aY, aZ, gX, gY, gZ, mX, mY, mZ, pressure, rssi));
+                aX, aY, aZ, gX, gY, gZ, mX, mY, mZ, pressure, rssi,
+                gvX, gvY, gvZ, laX, laY, laZ));
         if (listener != null) listener.onHeadingSteps(h, steps);
         persistPosition();
     }
