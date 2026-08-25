@@ -1018,12 +1018,12 @@ public class MappingCollector {
         if (rssi.isEmpty()) return;
         java.util.Map<String, Integer> freq = new java.util.HashMap<>(lastScanFreqByBssid);
         long ts = System.currentTimeMillis();
-        dbExecutor.execute(() -> {
+        dbExecutor.execute(() -> db.runInTransaction(() -> {
             for (java.util.Map.Entry<String, Integer> e : rssi.entrySet()) {
                 Integer f = freq.get(e.getKey());
                 db.insertPlaceFingerprint(ts, floor, label, e.getKey(), e.getValue(), f != null ? f : 0);
             }
-        });
+        }));
     }
 
     @SuppressLint("MissingPermission")
@@ -1057,18 +1057,18 @@ public class MappingCollector {
         if (Build.VERSION.SDK_INT < 28) return;
         long sid = sessionId;
         long ts = System.currentTimeMillis();
-        dbExecutor.execute(() -> {
+        dbExecutor.execute(() -> db.runInTransaction(() -> {
             for (RangingResult res : results) {
                 if (res.getStatus() == RangingResult.STATUS_SUCCESS) {
-                    db.insertRadioRtt(sid, ts, res.getMacAddress().toString(), 
+                    db.insertRadioRtt(sid, ts, res.getMacAddress().toString(),
                                      res.getDistanceMm(), res.getDistanceStdDevMm(), res.getRssi());
-                    
+
                     // Nudge towards AP if we have an estimate for it
                     // (Simplified PF update: treat as a localized anchor)
                     // ... (In a real implementation we'd use these as circular constraints)
                 }
             }
-        });
+        }));
     }
     public MappingDb.Counts counts() {
         return db.counts();
@@ -1105,9 +1105,14 @@ public class MappingCollector {
         long ts = System.currentTimeMillis();
         double x = posX, y = posY;
         dbExecutor.execute(() -> {
-            for (ScanResult r : results) {
-                db.insertRadioScan(sid, ts, r.BSSID, r.level, r.frequency, x, y);
-            }
+            // One transaction for the whole scan's rows instead of one
+            // auto-committed insert per BSSID -- see MappingDb.
+            // runInTransaction()'s doc.
+            db.runInTransaction(() -> {
+                for (ScanResult r : results) {
+                    db.insertRadioScan(sid, ts, r.BSSID, r.level, r.frequency, x, y);
+                }
+            });
             // Kalman fusion (see class doc): a fingerprint match is fed in
             // as a measurement, weighted by both the filter's current
             // uncertainty and the match's own confidence, so accumulated

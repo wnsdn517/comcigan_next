@@ -28,6 +28,41 @@ public class MappingDb extends SQLiteOpenHelper {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
     }
 
+    // Write-Ahead Logging instead of the platform default rollback
+    // journal -- Android's own SQLite performance guide recommends this
+    // for exactly this app's write pattern (a background service doing
+    // frequent small writes: one row per step/scan/second-heartbeat).
+    // enableWriteAheadLogging() also sets synchronous=NORMAL for WAL as
+    // part of enabling it, the officially recommended pairing (full
+    // durability against an app crash or being killed; only an actual
+    // device power-loss/kernel-panic could still lose the last commit,
+    // same tradeoff every WAL-mode app on Android makes). onConfigure()
+    // is the documented hook for this -- it runs before onCreate/
+    // onUpgrade, unlike setting it lazily on first use elsewhere.
+    @Override
+    public void onConfigure(SQLiteDatabase db) {
+        super.onConfigure(db);
+        db.enableWriteAheadLogging();
+    }
+
+    // Runs `work` (typically a handful of insertX() calls) as one SQLite
+    // transaction instead of each insert auto-committing (and fsync-ing)
+    // on its own -- both a correctness improvement (a multi-row write,
+    // like one Wi-Fi scan's whole set of results, either lands completely
+    // or not at all instead of possibly being caught half-written if the
+    // process dies mid-loop) and a real performance one (one fsync
+    // instead of N).
+    public void runInTransaction(Runnable work) {
+        SQLiteDatabase db = getWritableDatabase();
+        db.beginTransaction();
+        try {
+            work.run();
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
     // x/y are relative meters from the session's starting point, estimated
     // automatically by MappingCollector's dead-reckoning (step count +
     // compass heading) -- not typed in by hand. radio_scans and waypoints

@@ -16,11 +16,14 @@ import java.util.List;
 // an actual 3D plot without pulling in a GL dependency for one small
 // debug view. See MappingCollector for how the path itself is computed
 // (steps x heading, not typed in by hand), and MappingDb.estimateApPositions
-// for the Wi-Fi AP position estimates plotted alongside it. One finger
-// dragged left/right spins the view around the vertical axis (userYawDeg);
-// two fingers dragged up/down tilt the elevation angle (userPitchDeg);
-// three fingers dragged in any direction pan the view (userPanX/userPanY)
-// and pinched apart/together zoom it (userZoom). resetView() (wired to a
+// for the Wi-Fi AP position estimates plotted alongside it. Touch
+// controls follow the Google Maps convention:
+// one finger dragged in any direction pans the view (userPanX/userPanY);
+// two fingers pinched apart/together zoom (userZoom), twisted around each
+// other rotate the view (userYawDeg), and dragged vertically together
+// tilt the elevation angle (userPitchDeg) -- all three two-finger
+// components are read continuously off the same two pointers rather than
+// picking one exclusive gesture per touch-down. resetView() (wired to a
 // "현위치 보기" button in MainActivity) snaps all four back to their
 // defaults.
 public class MappingPathView extends View {
@@ -46,23 +49,27 @@ public class MappingPathView extends View {
     private float userZoom = 1f;
     private float userPanX = 0f;
     private float userPanY = 0f;
-    private static final float ROTATE_SENSITIVITY = 0.4f; // degrees rotated per pixel dragged (1 finger)
-    private static final float PITCH_SENSITIVITY = 0.3f; // degrees tilted per pixel dragged (2 fingers)
+    private static final float ROTATE_SENSITIVITY = 1f; // degrees rotated per degree the 2-finger angle changes
+    private static final float PITCH_SENSITIVITY = 0.3f; // degrees tilted per pixel the 2-finger centroid moves
     private static final float MIN_PITCH_OFFSET = -40f, MAX_PITCH_OFFSET = 44f; // keeps elevation in [5, 89] degrees
     private static final float MIN_ZOOM = 0.3f, MAX_ZOOM = 4f;
 
-    // Multi-touch gesture tracking: which gesture the current touch
-    // sequence means (decided by how many fingers are down) and the
-    // reference values deltas are measured against, re-baselined whenever
-    // the pointer count changes so adding/removing a finger never causes
-    // a jump.
-    private static final int MODE_YAW = 1, MODE_PITCH = 2, MODE_PAN_ZOOM = 3;
-    private int gestureMode = MODE_YAW;
+    // Google Maps-style gesture tracking: one finger pans; two or more
+    // read pinch-zoom/rotate/tilt continuously off pointer indices 0 and
+    // 1 specifically (not an average over every active pointer), matching
+    // how a real two-finger gesture is defined -- a 3rd+ finger is simply
+    // ignored rather than folded into a separate pan/zoom mode the way an
+    // earlier version of this view used 3 fingers for. Re-baselined
+    // whenever the pointer count changes so adding/removing a finger
+    // never causes a jump.
+    private static final int MODE_PAN = 1, MODE_MULTI = 2;
+    private int gestureMode = MODE_PAN;
     private int lastPointerCount = 0;
     private float lastTouchX = 0f;
-    private float lastAvgX = 0f;
-    private float lastAvgY = 0f;
-    private float lastAvgSpacing = 0f;
+    private float lastTouchY = 0f;
+    private float lastCentroidY = 0f;
+    private float lastSpacing = 0f;
+    private float lastAngleDeg = 0f;
 
     private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint pathPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -178,88 +185,82 @@ public class MappingPathView extends View {
         int n = event.getPointerCount();
         lastPointerCount = n;
         if (n <= 1) {
-            gestureMode = MODE_YAW;
+            gestureMode = MODE_PAN;
             lastTouchX = event.getX(0);
-        } else if (n == 2) {
-            gestureMode = MODE_PITCH;
-            lastAvgY = averageY(event);
+            lastTouchY = event.getY(0);
         } else {
-            gestureMode = MODE_PAN_ZOOM;
-            lastAvgX = averageX(event);
-            lastAvgY = averageY(event);
-            lastAvgSpacing = centroidSpread(event);
+            gestureMode = MODE_MULTI;
+            lastCentroidY = centroidY(event);
+            lastSpacing = spacing(event);
+            lastAngleDeg = angleDeg(event);
         }
     }
 
-    // Directions below are all inverted from the naive "delta follows the
-    // finger" mapping -- reported as feeling backwards once actually used
-    // on a device, so every axis here is negated relative to the raw
-    // touch delta.
+    // One finger pans (content follows the finger, like dragging a map --
+    // this exact sign was already the tuned/verified pan mapping from
+    // this view's earlier 3-finger pan mode, just retriggered off 1
+    // finger now). Two or more read pinch-zoom, twist-to-rotate, and
+    // vertical-drag-to-tilt continuously off the same two pointers --
+    // tilt reuses the exact sign this view's earlier 2-finger tilt mode
+    // already had verified on a real device; rotate's sign (twisting the
+    // same direction visually rotates the view) is this rewrite's one
+    // genuinely new, unverified guess -- flip it if it reads backwards on
+    // a device, the same way pan/tilt's signs were originally tuned.
     private void applyGestureDelta(MotionEvent event) {
-        switch (gestureMode) {
-            case MODE_YAW: {
-                float x = event.getX(0);
-                float dx = x - lastTouchX;
-                lastTouchX = x;
-                userYawDeg = (userYawDeg - dx * ROTATE_SENSITIVITY) % 360f;
-                break;
-            }
-            case MODE_PITCH: {
-                float avgY = averageY(event);
-                float dy = avgY - lastAvgY;
-                lastAvgY = avgY;
-                userPitchDeg = clamp(userPitchDeg + dy * PITCH_SENSITIVITY, MIN_PITCH_OFFSET, MAX_PITCH_OFFSET);
-                break;
-            }
-            case MODE_PAN_ZOOM: {
-                float avgX = averageX(event);
-                float avgY = averageY(event);
-                float dx = avgX - lastAvgX;
-                float dy = avgY - lastAvgY;
-                lastAvgX = avgX;
-                lastAvgY = avgY;
-                userPanX -= dx;
-                userPanY -= dy;
-
-                float spacing = centroidSpread(event);
-                if (lastAvgSpacing > 1f && spacing > 1f) {
-                    float ratio = clamp(spacing / lastAvgSpacing, 0.85f, 1.18f);
-                    userZoom = clamp(userZoom * ratio, MIN_ZOOM, MAX_ZOOM);
-                }
-                lastAvgSpacing = spacing;
-                break;
-            }
+        if (gestureMode == MODE_PAN) {
+            float x = event.getX(0), y = event.getY(0);
+            float dx = x - lastTouchX, dy = y - lastTouchY;
+            lastTouchX = x;
+            lastTouchY = y;
+            userPanX -= dx;
+            userPanY -= dy;
+            return;
         }
-    }
 
-    private static float averageX(MotionEvent e) {
-        int n = e.getPointerCount();
-        float sum = 0;
-        for (int i = 0; i < n; i++) sum += e.getX(i);
-        return sum / n;
-    }
-
-    private static float averageY(MotionEvent e) {
-        int n = e.getPointerCount();
-        float sum = 0;
-        for (int i = 0; i < n; i++) sum += e.getY(i);
-        return sum / n;
-    }
-
-    // Average distance of each active pointer from their shared centroid
-    // -- a pinch-distance measure that generalizes cleanly to 3+ fingers
-    // (unlike a single pairwise distance, which only works for exactly 2).
-    private static float centroidSpread(MotionEvent e) {
-        int n = e.getPointerCount();
-        float cx = 0, cy = 0;
-        for (int i = 0; i < n; i++) { cx += e.getX(i); cy += e.getY(i); }
-        cx /= n; cy /= n;
-        float sum = 0;
-        for (int i = 0; i < n; i++) {
-            float dx = e.getX(i) - cx, dy = e.getY(i) - cy;
-            sum += (float) Math.sqrt(dx * dx + dy * dy);
+        float spacing = spacing(event);
+        if (lastSpacing > 1f && spacing > 1f) {
+            float ratio = clamp(spacing / lastSpacing, 0.85f, 1.18f);
+            userZoom = clamp(userZoom * ratio, MIN_ZOOM, MAX_ZOOM);
         }
-        return sum / n;
+        lastSpacing = spacing;
+
+        float angleDeg = angleDeg(event);
+        float dAngle = angleDeltaDeg(angleDeg, lastAngleDeg);
+        lastAngleDeg = angleDeg;
+        userYawDeg = ((userYawDeg + dAngle * ROTATE_SENSITIVITY) % 360f + 360f) % 360f;
+
+        float centroidY = centroidY(event);
+        float dy = centroidY - lastCentroidY;
+        lastCentroidY = centroidY;
+        userPitchDeg = clamp(userPitchDeg + dy * PITCH_SENSITIVITY, MIN_PITCH_OFFSET, MAX_PITCH_OFFSET);
+    }
+
+    // Distance/angle/vertical-center of pointer indices 0 and 1
+    // specifically, not an average over every active pointer -- see
+    // MODE_MULTI's doc above for why.
+    private static float spacing(MotionEvent e) {
+        float dx = e.getX(1) - e.getX(0), dy = e.getY(1) - e.getY(0);
+        return (float) Math.sqrt(dx * dx + dy * dy);
+    }
+
+    private static float angleDeg(MotionEvent e) {
+        float dx = e.getX(1) - e.getX(0), dy = e.getY(1) - e.getY(0);
+        return (float) Math.toDegrees(Math.atan2(dy, dx));
+    }
+
+    private static float centroidY(MotionEvent e) {
+        return (e.getY(0) + e.getY(1)) / 2f;
+    }
+
+    // Shortest signed change from `to` to `from` in degrees, wrapped to
+    // [-180, 180] -- a naive `from - to` breaks the instant the two-finger
+    // angle crosses the +-180 boundary (e.g. 179 degrees to -179 degrees
+    // is really a 2-degree rotation, not a 358-degree one).
+    private static float angleDeltaDeg(float from, float to) {
+        float d = (from - to) % 360f;
+        if (d > 180f) d -= 360f;
+        if (d < -180f) d += 360f;
+        return d;
     }
 
     private static float clamp(float v, float lo, float hi) {

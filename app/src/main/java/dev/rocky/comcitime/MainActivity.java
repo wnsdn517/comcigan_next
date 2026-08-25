@@ -49,8 +49,9 @@ public class MainActivity extends Activity {
     private Prefs prefs;
 
     private LinearLayout[] pages;
-    private static final String[] TAB_NAMES = {"시간표", "급식", "설정"};
-    private static final String[] TAB_ICONS = {"📅", "🍱", "⚙️"};
+    private static final String[] TAB_NAMES = {"시간표", "급식", "지도", "설정"};
+    private static final String[] TAB_ICONS = {"📅", "🍱", "🗺", "⚙️"};
+    private static final int TAB_TIMETABLE = 0, TAB_MEAL = 1, TAB_MAP = 2, TAB_SETTINGS = 3;
 
     private TextView classHeaderLabel;
     private TextView teacherModeIndicator;
@@ -124,7 +125,7 @@ public class MainActivity extends Activity {
         LinearLayout outerCol = new LinearLayout(this);
         outerCol.setOrientation(LinearLayout.VERTICAL);
 
-        pages = new LinearLayout[]{buildTimetablePage(), buildMealPage(), buildSettingsPage()};
+        pages = new LinearLayout[]{buildTimetablePage(), buildMealPage(), buildMapPage(), buildSettingsPage()};
         FrameLayout container = new FrameLayout(this);
         for (LinearLayout p : pages) {
             container.addView(p, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -140,7 +141,7 @@ public class MainActivity extends Activity {
 
         setContentView(rootFrame);
         loadPrefsIntoUi();
-        showPage(prefs.schoolCode().isEmpty() ? 2 : 0);
+        showPage(prefs.schoolCode().isEmpty() ? TAB_SETTINGS : TAB_TIMETABLE);
 
         if (prefs.onboardingDone()) {
             onboardingOverlay.setVisibility(View.GONE);
@@ -318,13 +319,13 @@ public class MainActivity extends Activity {
         updateBottomNavHighlight(index);
         nowPanelHandler.removeCallbacksAndMessages(null);
         mappingTickHandler.removeCallbacksAndMessages(null);
-        if (index == 0) { loadAllWeeks(); tickNowPanel(); }
-        if (index == 1) refreshMeal();
-        if (index == 2) {
-            refreshColorsList();
+        if (index == TAB_TIMETABLE) { loadAllWeeks(); tickNowPanel(); }
+        if (index == TAB_MEAL) refreshMeal();
+        if (index == TAB_MAP) {
             refreshMappingStatus();
-            if (accMapping != null && accMapping.getVisibility() == View.VISIBLE) startMappingTick();
+            startMappingTick();
         }
+        if (index == TAB_SETTINGS) refreshColorsList();
     }
 
     private FrameLayout buildOnboardingOverlay() {
@@ -587,7 +588,7 @@ public class MainActivity extends Activity {
                     loadPrefsIntoUi();
                     startMappingServiceIfPermitted();
                     loadAllWeeks();
-                    showPage(0);
+                    showPage(TAB_TIMETABLE);
                 }).start();
             });
         });
@@ -640,7 +641,7 @@ public class MainActivity extends Activity {
         headerClickable.setClickable(true);
         headerClickable.setFocusable(true);
         UiKit.attachBouncyPress(headerClickable);
-        headerClickable.setOnClickListener(v -> showPage(2));
+        headerClickable.setOnClickListener(v -> showPage(TAB_SETTINGS));
         classHeaderLabel = new TextView(this);
         classHeaderLabel.setTextColor(UiKit.TEXT_PRIMARY);
         classHeaderLabel.setTextSize(20);
@@ -1592,8 +1593,8 @@ public class MainActivity extends Activity {
     }
 
     // ==================== SETTINGS PAGE (accordion, decluttered) ====================
-    private LinearLayout accSchool, accTheme, accNotif, accMeal, accMapping;
-    private Button accSchoolBtn, accThemeBtn, accNotifBtn, accMealBtn, accMappingBtn;
+    private LinearLayout accSchool, accTheme, accNotif, accMeal;
+    private Button accSchoolBtn, accThemeBtn, accNotifBtn, accMealBtn;
 
     private LinearLayout buildSettingsPage() {
         LinearLayout root = new LinearLayout(this);
@@ -1616,21 +1617,41 @@ public class MainActivity extends Activity {
         accTheme = buildThemeSection();
         accNotif = buildNotifSection();
         accMeal = buildMealSection();
-        accMapping = buildMappingSection();
 
         accSchoolBtn = accordionHeader("\ud83c\udfeb  학교 / 학급", accSchool);
         accThemeBtn = accordionHeader("\ud83c\udfa8  테마 (과목 색상)", accTheme);
         accNotifBtn = accordionHeader("\ud83d\udd14  알림", accNotif);
         accMealBtn = accordionHeader("\ud83c\udf7d  급식 연동", accMeal);
-        accMappingBtn = accordionHeader("🗺  실내 지도 만들기 (실험)", accMapping);
 
         list.addView(accSchoolBtn); list.addView(accSchool);
         list.addView(accThemeBtn); list.addView(accTheme);
         list.addView(accNotifBtn); list.addView(accNotif);
         list.addView(accMealBtn); list.addView(accMeal);
-        list.addView(accMappingBtn); list.addView(accMapping);
 
         scroll.addView(list);
+        root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        return root;
+    }
+
+    // Own top-level tab (TAB_MAP) now, not a Settings accordion entry --
+    // the live sensor readout / 3D path view need real screen space and
+    // don't belong buried behind a settings toggle a user has to remember
+    // to open every time.
+    private LinearLayout buildMapPage() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(20), dp(20), dp(20), dp(24));
+
+        TextView title = new TextView(this);
+        title.setText("실내 지도");
+        title.setTextSize(22);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setTextColor(UiKit.TEXT_PRIMARY);
+        title.setPadding(0, 0, 0, dp(16));
+        root.addView(title);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(buildMappingSection());
         root.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         return root;
     }
@@ -1647,23 +1668,21 @@ public class MainActivity extends Activity {
         b.setLayoutParams(lp);
         b.setOnClickListener(v -> {
             boolean opening = content.getVisibility() != View.VISIBLE;
-            for (LinearLayout other : new LinearLayout[]{accSchool, accTheme, accNotif, accMeal, accMapping}) {
+            for (LinearLayout other : new LinearLayout[]{accSchool, accTheme, accNotif, accMeal}) {
                 if (other != null) other.setVisibility(View.GONE);
             }
             if (opening) {
                 content.setVisibility(View.VISIBLE);
                 UiKit.popIn(content);
             }
-            mappingTickHandler.removeCallbacksAndMessages(null);
-            if (accMapping != null && accMapping.getVisibility() == View.VISIBLE) startMappingTick();
         });
         return b;
     }
 
     // Keeps the live sensor readout / 3D gizmo / raw-data graphs updating
-    // at MAPPING_TICK_MS, but only while the mapping accordion section is
-    // actually visible -- torn down on every tab switch or accordion
-    // toggle above so it's never ticking in the background for no reason.
+    // at MAPPING_TICK_MS, but only while the 지도 tab is actually open --
+    // showPage() clears pending callbacks on every tab switch so it's
+    // never ticking in the background for no reason.
     // The DB-backed bits (status/counts/path drawing) only need a fraction
     // of that rate: querying SQLite on the main thread every ~300ms would
     // risk visible jank, so those refresh every MAPPING_SLOW_TICKS ticks
@@ -2060,7 +2079,7 @@ public class MainActivity extends Activity {
         pathLp.topMargin = dp(8);
         pathCard.addView(mappingPathView, pathLp);
         TextView pathLegend = new TextView(this);
-        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치\n손가락 1개 좌우로 회전 · 2개 상하로 기울기 · 3개로 상하좌우 이동 · 오므리고 벌려서 확대축소");
+        pathLegend.setText("● 원점 · ● 현재 위치 · ◆ 추정 Wi-Fi AP 위치\n손가락 1개로 이동 · 2개로 회전/기울기 · 오므리고 벌려서 확대축소 (구글 지도와 동일)");
         UiKit.styleCaption(pathLegend);
         pathLegend.setPadding(0, dp(4), 0, 0);
         pathCard.addView(pathLegend);
@@ -2592,7 +2611,7 @@ public class MainActivity extends Activity {
         NotificationScheduler.rescheduleAll(this);
         if (prefs.liveNotify()) startForegroundService(new Intent(this, LiveNotifyService.class));
         Toast.makeText(this, "적용했어요.", Toast.LENGTH_SHORT).show();
-        showPage(0);
+        showPage(TAB_TIMETABLE);
     }
 
     private void saveCurrentAsNamedClass() {
