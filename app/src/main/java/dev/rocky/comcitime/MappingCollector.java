@@ -97,6 +97,20 @@ import java.util.concurrent.Executors;
 // "In-outdoorSeamlessPositioningNavigationSystem" project), scaled down to
 // one filter dimension per axis instead of a full multi-sensor state
 // vector, which is enough for this experimental single-building scope.
+//
+// That passive fingerprint map has no real "ground truth" of its own,
+// though -- it's built entirely from dead reckoning's own (possibly
+// already-drifted) position estimates, so it can only ever smooth the
+// trajectory locally, not anchor it to an absolute point. addPlaceTag()
+// (the "여기 표시" UI action) additionally registers the current Wi-Fi
+// scan as an anchor tied to a real, deliberately-tagged place; matching
+// against those (see MappingDb.estimateLocationFromAnchor(), applied via
+// applyAnchorCorrection()) is a separate, much harder correction than the
+// passive blend, since an anchor is a real assertion ("I am at this exact
+// place") rather than just wherever the trajectory happened to be. Walking
+// a loop tagging anchors around each floor (once is enough; more
+// coverage only helps) is what actually keeps a long session's
+// accumulated drift bounded instead of only ever growing.
 public class MappingCollector {
 
     public interface Listener {
@@ -212,6 +226,10 @@ public class MappingCollector {
     // manual place tag (see addPlaceTag()) can persist real frequencies
     // instead of a placeholder.
     private java.util.Map<String, Integer> lastScanFreqByBssid = new java.util.HashMap<>();
+    // SSIDs for the same scan, purely for the live per-AP signal-strength
+    // readout (see MainActivity's mappingApRssiText) -- BSSIDs alone aren't
+    // human-readable, and nothing here persists SSID to the DB.
+    private java.util.Map<String, String> lastScanSsidByBssid = new java.util.HashMap<>();
 
     // Latest live place-recognition result (MappingDb.recognizePlace()),
     // refreshed on every Wi-Fi scan alongside the fingerprint-correction
@@ -783,6 +801,7 @@ public class MappingCollector {
     public float getHeadingDeg() { return headingDeg; }
     public double getLastStepLengthM() { return lastStepLengthM; }
     public java.util.Map<String, Integer> getLastScanRssi() { return lastScanRssi; }
+    public java.util.Map<String, String> getLastScanSsidByBssid() { return lastScanSsidByBssid; }
     public MappingDb.PlaceMatch getLastPlaceMatch() { return lastPlaceMatch; }
     public float getPitchDeg() { return pitchDeg; }
     public float getRollDeg() { return rollDeg; }
@@ -887,8 +906,42 @@ public class MappingCollector {
         if (isStationary) return;
         double std = Math.max(0.5, matchDistance * 0.1);
         updateParticlesMeasurement(mx, my, std);
-        
+
         // Old EKF style variance update (kept for metadata)
+        double r = std * std;
+        double kx = posVarX / (posVarX + r);
+        double ky = posVarY / (posVarY + r);
+        posVarX *= (1 - kx);
+        posVarY *= (1 - ky);
+    }
+
+    // A registered anchor (MappingDb.PlaceFingerprint tagged via
+    // addPlaceTag()) is a deliberate "this exact place" claim, not just
+    // wherever a passive scan happened to be recorded -- so a confident
+    // match is trusted with a much tighter measurement std than
+    // applyFingerprintCorrection()'s passive blend above, pulling harder
+    // toward the anchor's asserted coordinate. This is what actually
+    // bounds accumulated dead-reckoning drift on a long walk: registering
+    // anchors around a building (one per floor, ideally a full loop -- the
+    // more of the building is covered, the more often a walk passes near
+    // one) means every return trip near a known point snaps position back
+    // close to ground truth instead of drift only ever growing between
+    // manual origin resets. ANCHOR_MATCH_MAX_DISTANCE guards against a
+    // weak/ambiguous match (e.g. an unrelated place with a coincidentally
+    // similar RSSI signature) triggering a hard correction toward the
+    // wrong anchor -- a starting heuristic threshold (same RMS
+    // differential-RSSI-dB units as fingerprintDistance()), not measured
+    // against real hardware. Same ZUPT gate as applyFingerprintCorrection()
+    // for the same reason: no real reason position should move while the
+    // phone is genuinely standing still.
+    private static final double ANCHOR_MATCH_MAX_DISTANCE = 12.0;
+
+    private void applyAnchorCorrection(double ax, double ay, double matchDistance) {
+        if (isStationary) return;
+        if (matchDistance > ANCHOR_MATCH_MAX_DISTANCE) return;
+        double std = Math.max(0.3, matchDistance * 0.03);
+        updateParticlesMeasurement(ax, ay, std);
+
         double r = std * std;
         double kx = posVarX / (posVarX + r);
         double ky = posVarY / (posVarY + r);
@@ -1064,9 +1117,16 @@ public class MappingCollector {
     // (lastScanRssi/lastScanFreqByBssid) under the same floor/label,
     // building a place->Wi-Fi-fingerprint directory independent of dead-
     // reckoning drift/accuracy -- a direct manual ground-truth tag, not
-    // inferred from posX/posY. No-ops if no Wi-Fi scan has landed yet;
-    // addWaypoint's position tag still succeeds either way, since the two
-    // are independent persistence paths sharing one user tap. Not session-
+    // inferred from posX/posY. Also records the dead-reckoned position at
+    // this exact moment as the tag's asserted anchor coordinate: unlike
+    // radio_scans' x/y (wherever dead reckoning happened to be during
+    // ordinary passive collection, however drifted that was), this one is
+    // a deliberate "I am at this real place right now" claim, which is
+    // what applyAnchorCorrection() below trusts to correct much harder
+    // than the passive per-scan blend the next time this Wi-Fi signature
+    // is recognized. No-ops if no Wi-Fi scan has landed yet; addWaypoint's
+    // position tag still succeeds either way, since the two are
+    // independent persistence paths sharing one user tap. Not session-
     // scoped (no sessionId gate) -- places are meant to accumulate across
     // sessions/days, unlike per-session dead-reckoning data.
     public void addPlaceTag(String floor, String label) {
@@ -1074,10 +1134,11 @@ public class MappingCollector {
         if (rssi.isEmpty()) return;
         java.util.Map<String, Integer> freq = new java.util.HashMap<>(lastScanFreqByBssid);
         long ts = System.currentTimeMillis();
+        double x = posX, y = posY;
         dbExecutor.execute(() -> db.runInTransaction(() -> {
             for (java.util.Map.Entry<String, Integer> e : rssi.entrySet()) {
                 Integer f = freq.get(e.getKey());
-                db.insertPlaceFingerprint(ts, floor, label, e.getKey(), e.getValue(), f != null ? f : 0);
+                db.insertPlaceFingerprint(ts, floor, label, e.getKey(), e.getValue(), f != null ? f : 0, x, y);
             }
         }));
     }
@@ -1149,14 +1210,17 @@ public class MappingCollector {
         int top = -120;
         java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
         java.util.Map<String, Integer> freqByBssid = new java.util.HashMap<>();
+        java.util.Map<String, String> ssidByBssid = new java.util.HashMap<>();
         for (ScanResult r : results) {
             if (r.level > top) top = r.level;
             rssiByBssid.put(r.BSSID, r.level);
             freqByBssid.put(r.BSSID, r.frequency);
+            ssidByBssid.put(r.BSSID, r.SSID);
         }
         lastTopRssi = top;
         lastScanRssi = rssiByBssid;
         lastScanFreqByBssid = freqByBssid;
+        lastScanSsidByBssid = ssidByBssid;
         long sid = sessionId;
         long ts = System.currentTimeMillis();
         double x = posX, y = posY;
@@ -1178,7 +1242,18 @@ public class MappingCollector {
             if (match != null) {
                 handler.post(() -> applyFingerprintCorrection(match[0], match[1], match[2]));
             }
-            
+
+            // Stronger correction against manually-registered anchors (see
+            // addPlaceTag()/applyAnchorCorrection()) -- independent of, and
+            // in addition to, the passive blend just above. k=3 instead of
+            // 5: anchors are deliberately placed and expected to be sparser
+            // than passive scans, so fewer, closer neighbors are more
+            // meaningful here than a wider average would be.
+            double[] anchorMatch = db.estimateLocationFromAnchor(rssiByBssid, 3);
+            if (anchorMatch != null) {
+                handler.post(() -> applyAnchorCorrection(anchorMatch[0], anchorMatch[1], anchorMatch[2]));
+            }
+
             // Perform RTT Ranging if available
             if (Build.VERSION.SDK_INT >= 28 && wifiRttManager != null) {
                 startRttRanging(results);

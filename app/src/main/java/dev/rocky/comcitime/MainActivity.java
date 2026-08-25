@@ -97,7 +97,7 @@ public class MainActivity extends Activity {
     private TextView mealStatusText;
     private LinearLayout mealContent;
 
-    private TextView mappingStatusText, mappingCountsText, mappingSensorText, mappingStrideText;
+    private TextView mappingStatusText, mappingCountsText, mappingSensorText, mappingStrideText, mappingApRssiText;
     private Button mappingGrantBtn, mappingBatteryBtn;
     private EditText mappingFloorInput, mappingLabelInput;
     private OrientationGizmoView mappingGizmoView;
@@ -2075,6 +2075,21 @@ public class MainActivity extends Activity {
         sensorCard.addView(mappingSensorText, sensorTextLp);
         section.addView(sensorCard, cardLp());
 
+        LinearLayout apRssiCard = card();
+        apRssiCard.addView(eyebrow("실시간 Wi-Fi 신호 강도 (AP별)"));
+        TextView apRssiHint = new TextView(this);
+        apRssiHint.setText("주변 AP마다 개별 신호 세기예요. Wi-Fi 스캔 자체는 약 30초 간격으로만 갱신돼요 (기기 제한).");
+        UiKit.styleCaption(apRssiHint);
+        apRssiHint.setPadding(0, dp(2), 0, 0);
+        apRssiCard.addView(apRssiHint);
+        mappingApRssiText = new TextView(this);
+        UiKit.styleCaption(mappingApRssiText);
+        mappingApRssiText.setTypeface(Typeface.MONOSPACE);
+        LinearLayout.LayoutParams apRssiTextLp = matchWrap();
+        apRssiTextLp.topMargin = dp(8);
+        apRssiCard.addView(mappingApRssiText, apRssiTextLp);
+        section.addView(apRssiCard, cardLp());
+
         LinearLayout pathCard = card();
         pathCard.addView(eyebrow("이동 경로 (3D 평면도)"));
         mappingPathView = new MappingPathView(this);
@@ -2181,9 +2196,9 @@ public class MainActivity extends Activity {
         section.addView(strideCard, cardLp());
 
         LinearLayout waypointCard = card();
-        waypointCard.addView(eyebrow("위치 이름표 (선택)"));
+        waypointCard.addView(eyebrow("위치 이름표 · 위치 앵커 등록"));
         TextView waypointHint = new TextView(this);
-        waypointHint.setText("이동 경로는 자동으로 기록돼요. 나중에 지도에 이름을 붙이고 싶은 지점이 있으면 여기서 표시해두세요.");
+        waypointHint.setText("이동 경로는 자동으로 기록돼요. 여기서 표시하면 이름표뿐 아니라 이 지점의 Wi-Fi 신호도 위치 기준점(앵커)으로 등록되어, 나중에 같은 곳으로 돌아오면 위치가 절대 위치에 가깝게 다시 보정돼요. 건물을 층별로 한 바퀴씩 돌면서 여러 곳에 표시해두면 정확도가 좋아져요.");
         UiKit.styleCaption(waypointHint);
         waypointHint.setPadding(0, dp(2), 0, 0);
         waypointCard.addView(waypointHint);
@@ -2414,6 +2429,7 @@ public class MainActivity extends Activity {
         if (running == null) {
             mappingSensorText.setText("수집 중이 아니에요.");
             if (mappingStrideText != null) mappingStrideText.setText("");
+            if (mappingApRssiText != null) mappingApRssiText.setText("");
             if (mappingGizmoView != null) mappingGizmoView.setOrientation(0, 0, 0);
             for (SparklineView gv : new SparklineView[]{accelGraph, gyroGraph, magGraph, pressureGraph, rssiGraph, gyroYawGraph}) {
                 if (gv != null) gv.setSeries(new ArrayList<>(), 0);
@@ -2454,6 +2470,9 @@ public class MainActivity extends Activity {
                     "최근 걸음 보폭(자동 추정) %.2fm  ·  방향 소스: %s",
                     running.getLastStepLengthM(), dirSource));
         }
+        if (mappingApRssiText != null) {
+            mappingApRssiText.setText(formatApRssiList(running));
+        }
 
         running.pushRawHistorySample();
         int histCount = running.getHistoryCount();
@@ -2476,6 +2495,40 @@ public class MainActivity extends Activity {
                 new SparklineView.Series(running.getRssiHistory(), 0xFFB57BFF, null)), histCount);
         if (gyroYawGraph != null) gyroYawGraph.setSeries(java.util.Collections.singletonList(
                 new SparklineView.Series(running.getGyroYawHistory(), 0xFF4CD3C2, null)), histCount);
+    }
+
+    // Individual per-AP signal strength for mappingApRssiText -- the
+    // sensor readout above only ever showed lastTopRssi (the single
+    // strongest signal), collapsing away every other AP actually seen.
+    // Sorted strongest-first and capped so a busy Wi-Fi environment
+    // doesn't overflow the card; SSID falls back to the BSSID's last 5
+    // characters for a hidden/blank network, which is still enough to
+    // tell two same-named APs apart at a glance.
+    private static final int AP_RSSI_LIST_MAX = 8;
+
+    private String formatApRssiList(MappingCollector running) {
+        java.util.Map<String, Integer> rssiMap = running.getLastScanRssi();
+        if (rssiMap.isEmpty()) return "아직 스캔 결과가 없어요.";
+        java.util.Map<String, String> ssidMap = running.getLastScanSsidByBssid();
+        List<java.util.Map.Entry<String, Integer>> sorted = new ArrayList<>(rssiMap.entrySet());
+        sorted.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
+        StringBuilder sb = new StringBuilder();
+        int shown = 0;
+        for (java.util.Map.Entry<String, Integer> e : sorted) {
+            if (shown >= AP_RSSI_LIST_MAX) break;
+            String bssid = e.getKey();
+            String ssid = ssidMap.get(bssid);
+            if (ssid == null || ssid.isEmpty() || ssid.equals("<unknown ssid>")) {
+                ssid = bssid.length() >= 5 ? "(" + bssid.substring(bssid.length() - 5) + ")" : "(숨김)";
+            }
+            if (shown > 0) sb.append('\n');
+            sb.append(String.format(Locale.KOREA, "%-20s %4d dBm", ssid, e.getValue()));
+            shown++;
+        }
+        if (rssiMap.size() > AP_RSSI_LIST_MAX) {
+            sb.append(String.format(Locale.KOREA, "\n… 외 %d개", rssiMap.size() - AP_RSSI_LIST_MAX));
+        }
+        return sb.toString();
     }
 
     // Shows each Wi-Fi access point's estimated position (RSSI-weighted

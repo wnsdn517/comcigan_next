@@ -22,7 +22,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 8;
+    private static final int DB_VERSION = 9;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -108,9 +108,15 @@ public class MappingDb extends SQLiteOpenHelper {
         // 표시", labeled with the place name they typed. Not session-scoped
         // -- places are meant to accumulate across sessions/days, unlike
         // per-session dead-reckoning data. See MappingDb.recognizePlace().
+        // x/y is the dead-reckoned position at the same moment -- an
+        // explicit, user-asserted anchor point (see MappingCollector.
+        // addPlaceTag()/applyAnchorCorrection()), unlike radio_scans' x/y
+        // which is just wherever dead reckoning happened to be during
+        // ordinary passive collection.
         db.execSQL("CREATE TABLE IF NOT EXISTS place_fingerprints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, " +
-                "floor TEXT, label TEXT, bssid TEXT, rssi INTEGER, freq INTEGER)");
+                "floor TEXT, label TEXT, bssid TEXT, rssi INTEGER, freq INTEGER, " +
+                "x REAL, y REAL)");
         // Manually-triggered full raw-sensor snapshots -- see
         // MappingCollector.snapshotSensors() / MainActivity's "센서값 기록"
         // button. Separate from motion_samples (which only ever records
@@ -149,6 +155,8 @@ public class MappingDb extends SQLiteOpenHelper {
         addColumnIfMissing(db, "motion_samples", "mag_z", "REAL");
         addColumnIfMissing(db, "motion_samples", "pressure_hpa", "REAL");
         addColumnIfMissing(db, "motion_samples", "top_rssi", "INTEGER");
+        addColumnIfMissing(db, "place_fingerprints", "x", "REAL");
+        addColumnIfMissing(db, "place_fingerprints", "y", "REAL");
     }
 
     // ALTER TABLE ADD COLUMN has no IF NOT EXISTS in the SQLite versions
@@ -254,7 +262,7 @@ public class MappingDb extends SQLiteOpenHelper {
         getWritableDatabase().insert("waypoints", null, cv);
     }
 
-    public void insertPlaceFingerprint(long ts, String floor, String label, String bssid, int rssi, int freq) {
+    public void insertPlaceFingerprint(long ts, String floor, String label, String bssid, int rssi, int freq, double x, double y) {
         ContentValues cv = new ContentValues();
         cv.put("ts", ts);
         cv.put("floor", floor);
@@ -262,6 +270,8 @@ public class MappingDb extends SQLiteOpenHelper {
         cv.put("bssid", bssid);
         cv.put("rssi", rssi);
         cv.put("freq", freq);
+        cv.put("x", x);
+        cv.put("y", y);
         getWritableDatabase().insert("place_fingerprints", null, cv);
     }
 
@@ -501,6 +511,11 @@ public class MappingDb extends SQLiteOpenHelper {
     // sessions rather than being scoped to one.
     private static class PlaceFingerprint {
         String floor, label;
+        // NaN for a tag recorded before the x/y columns existed (a device
+        // still on an older export/DB that never got a value written) --
+        // estimateLocationFromAnchor() below skips those, since they have
+        // no asserted position to correct toward.
+        double x = Double.NaN, y = Double.NaN;
         java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
     }
 
@@ -508,21 +523,64 @@ public class MappingDb extends SQLiteOpenHelper {
         java.util.LinkedHashMap<Long, PlaceFingerprint> byTs = new java.util.LinkedHashMap<>();
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor cur = db.rawQuery(
-                "SELECT ts, floor, label, bssid, rssi FROM place_fingerprints ORDER BY ts", null)) {
+                "SELECT ts, floor, label, bssid, rssi, x, y FROM place_fingerprints ORDER BY ts", null)) {
             while (cur.moveToNext()) {
                 long ts = cur.getLong(0);
                 String floor = cur.getString(1);
                 String label = cur.getString(2);
+                double x = cur.isNull(5) ? Double.NaN : cur.getDouble(5);
+                double y = cur.isNull(6) ? Double.NaN : cur.getDouble(6);
                 PlaceFingerprint pf = byTs.computeIfAbsent(ts, k -> {
                     PlaceFingerprint p = new PlaceFingerprint();
                     p.floor = floor;
                     p.label = label;
+                    p.x = x;
+                    p.y = y;
                     return p;
                 });
                 pf.rssiByBssid.put(cur.getString(3), cur.getInt(4));
             }
         }
         return new ArrayList<>(byTs.values());
+    }
+
+    // Registered-anchor counterpart of estimateLocationFromFingerprint()
+    // above: matches a live scan against manually-tagged place_fingerprints
+    // (see MappingCollector.addPlaceTag()) instead of every passively-
+    // collected radio_scans row. An anchor's x/y is a real place the user
+    // deliberately tagged, not just wherever dead reckoning happened to be
+    // when an automatic scan landed, so a confident match here is a much
+    // stronger "I am definitely back at this exact spot" signal -- see
+    // MappingCollector.applyAnchorCorrection(), which uses this to correct
+    // much harder than the passive blend. Same {x, y, avgMatchDistance}
+    // shape and null-when-nothing-comparable behavior as
+    // estimateLocationFromFingerprint().
+    public double[] estimateLocationFromAnchor(java.util.Map<String, Integer> liveRssi, int k) {
+        if (liveRssi == null || liveRssi.isEmpty()) return null;
+        List<PlaceFingerprint> all = allPlaceFingerprints();
+        if (all.isEmpty()) return null;
+
+        List<double[]> scored = new ArrayList<>(); // {distance, x, y}
+        for (PlaceFingerprint pf : all) {
+            if (Double.isNaN(pf.x) || Double.isNaN(pf.y)) continue;
+            double dist = fingerprintDistance(liveRssi, pf.rssiByBssid);
+            if (dist < 0) continue;
+            scored.add(new double[]{dist, pf.x, pf.y});
+        }
+        if (scored.isEmpty()) return null;
+
+        scored.sort((a, b) -> Double.compare(a[0], b[0]));
+        int n = Math.min(k, scored.size());
+        double wSum = 0, wx = 0, wy = 0, distSum = 0;
+        for (int i = 0; i < n; i++) {
+            double[] s = scored.get(i);
+            double w = 1.0 / (s[0] + 1.0);
+            wSum += w;
+            wx += w * s[1];
+            wy += w * s[2];
+            distSum += s[0];
+        }
+        return new double[]{wx / wSum, wy / wSum, distSum / n};
     }
 
     public static class PlaceMatch {
