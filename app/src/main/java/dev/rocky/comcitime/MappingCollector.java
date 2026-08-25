@@ -283,6 +283,11 @@ public class MappingCollector {
     // in estimateStepLength() genuinely needs the magnitude, not an axis).
     private float accelMag = 0f;
     private float accelX, accelY, accelZ, gyroX, gyroY, gyroZ, magX, magY, magZ;
+    // Platform-fused gravity-only vector (TYPE_GRAVITY), used instead of
+    // the raw accelerometer for updateMagneticReliability()'s dip-angle
+    // check below -- see that method's doc for why the raw accelerometer
+    // isn't actually gravity while walking.
+    private float gravityX, gravityY, gravityZ;
     private float pressureHpa = 0f, refPressureHpa = 0f;
     private int lastTopRssi = -120;
     private int screenRotationDeg = -1;
@@ -400,6 +405,9 @@ public class MappingCollector {
                     }
                     lastGyroTimestampNs = event.timestamp;
                     break;
+                case Sensor.TYPE_GRAVITY:
+                    gravityX = event.values[0]; gravityY = event.values[1]; gravityZ = event.values[2];
+                    break;
                 case Sensor.TYPE_MAGNETIC_FIELD:
                     magX = event.values[0]; magY = event.values[1]; magZ = event.values[2];
                     updateMagneticReliability();
@@ -427,21 +435,22 @@ public class MappingCollector {
         return (target - current + 540) % 360 - 180;
     }
 
-    // Angle between the magnetic field vector and the (accelerometer-
-    // approximated) gravity vector -- the "dip angle" used by
-    // updateMagneticReliability() below. Using the raw accelerometer as a
-    // gravity proxy (rather than a separately low-pass-filtered gravity
-    // estimate) is an approximation, but adequate here: dip-angle
-    // consistency is checked over a rolling window (see dipAngleWindow),
-    // so brief accelerometer noise from motion washes out the same way
-    // sensor noise does, without needing a dedicated gravity filter.
+    // Angle between the magnetic field vector and the gravity vector --
+    // the "dip angle" used by updateMagneticReliability() below. Takes the
+    // platform-fused TYPE_GRAVITY reading (gravityX/Y/Z), not the raw
+    // accelerometer: the raw accelerometer is only approximately gravity
+    // while the phone is still, and is dominated by footstep/swing
+    // acceleration while walking -- an earlier version of this used raw
+    // accel here, which made the dip angle swing on every step (motion,
+    // not real magnetic disturbance) and constantly, falsely reported the
+    // compass as unreliable while simply walking around.
     private static double dipAngleDeg(float magX, float magY, float magZ,
-                                       float accelX, float accelY, float accelZ) {
-        double dot = magX * accelX + magY * accelY + magZ * accelZ;
+                                       float gravX, float gravY, float gravZ) {
+        double dot = magX * gravX + magY * gravY + magZ * gravZ;
         double magMag = Math.sqrt(magX * magX + magY * magY + magZ * magZ);
-        double accelMag = Math.sqrt(accelX * accelX + accelY * accelY + accelZ * accelZ);
-        if (magMag < 1e-3 || accelMag < 1e-3) return 90;
-        double cos = Math.max(-1, Math.min(1, dot / (magMag * accelMag)));
+        double gravMag = Math.sqrt(gravX * gravX + gravY * gravY + gravZ * gravZ);
+        if (magMag < 1e-3 || gravMag < 1e-3) return 90;
+        double cos = Math.max(-1, Math.min(1, dot / (magMag * gravMag)));
         return Math.toDegrees(Math.acos(cos));
     }
 
@@ -457,7 +466,14 @@ public class MappingCollector {
         float magMagnitude = vectorMag(new float[]{magX, magY, magZ});
         boolean magnitudeOk = magMagnitude >= MAG_MIN_UT && magMagnitude <= MAG_MAX_UT;
 
-        double dip = dipAngleDeg(magX, magY, magZ, accelX, accelY, accelZ);
+        // Falls back to raw accel only if this device never actually
+        // delivered a TYPE_GRAVITY event (gravityX/Y/Z all exactly 0 is
+        // otherwise physically impossible -- that would mean true
+        // freefall -- so it's a safe "not received yet" sentinel).
+        boolean haveGravity = gravityX != 0f || gravityY != 0f || gravityZ != 0f;
+        double dip = haveGravity
+                ? dipAngleDeg(magX, magY, magZ, gravityX, gravityY, gravityZ)
+                : dipAngleDeg(magX, magY, magZ, accelX, accelY, accelZ);
         dipAngleWindow[dipAngleWindowIdx] = (float) dip;
         dipAngleWindowIdx = (dipAngleWindowIdx + 1) % dipAngleWindow.length;
         float mean = 0;
@@ -755,6 +771,7 @@ public class MappingCollector {
     public int getStepCount() { return stepCount; }
     public double getPosX() { return posX; }
     public double getPosY() { return posY; }
+    public long getSessionId() { return sessionId; }
     public boolean isStationary() { return isStationary; }
     public boolean isInGaitStreak() { return inGaitStreak; }
     public boolean isMagneticReliable() { return magneticReliable; }
@@ -899,6 +916,7 @@ public class MappingCollector {
         registerIfAvailable(Sensor.TYPE_GYROSCOPE);
         registerIfAvailable(Sensor.TYPE_MAGNETIC_FIELD);
         registerIfAvailable(Sensor.TYPE_PRESSURE);
+        registerIfAvailable(Sensor.TYPE_GRAVITY);
 
         orientationEventListener = new OrientationEventListener(ctx) {
             @Override

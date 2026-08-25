@@ -2398,7 +2398,7 @@ public class MainActivity extends Activity {
             mappingPathView.setFloorDelta(0);
             return;
         }
-        List<double[]> path = mappingDb.recentPath(300);
+        List<double[]> path = mappingDb.pathForSession(running.getSessionId(), 20000);
         mappingPathView.setPath(path, running.getPosX(), running.getPosY());
         mappingPathView.setFloorDelta(running.getEstimatedFloorDelta());
     }
@@ -2445,9 +2445,14 @@ public class MainActivity extends Activity {
                 placeStr));
         if (mappingGizmoView != null) mappingGizmoView.setOrientation(heading, pitch, roll);
         if (mappingStrideText != null) {
+            // Was a hardcoded "자이로 적분" label regardless of which
+            // source was actually steering direction -- now reflects the
+            // real live choice (see MappingCollector.applyStep()'s dirDeg
+            // selection), the same condition that decides it there.
+            String dirSource = running.isMagneticReliable() ? "나침반" : "자이로 적분 (나침반 불안정)";
             mappingStrideText.setText(String.format(Locale.KOREA,
-                    "최근 걸음 보폭(자동 추정) %.2fm  ·  방향 소스: 자이로 적분",
-                    running.getLastStepLengthM()));
+                    "최근 걸음 보폭(자동 추정) %.2fm  ·  방향 소스: %s",
+                    running.getLastStepLengthM(), dirSource));
         }
 
         running.pushRawHistorySample();

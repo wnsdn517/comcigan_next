@@ -607,6 +607,28 @@ public class MappingDb extends SQLiteOpenHelper {
         return out;
     }
 
+    // Like recentPath(), but scoped to one session instead of "most recent
+    // N rows overall" -- the continuous per-second heartbeat
+    // (MappingCollector.motionRecordTick) plus per-step rows means a fixed
+    // row-count limit now covers much less real time than it used to
+    // (denser writes eat the budget faster), so the drawn path visibly
+    // shrank/lost its start the longer a walk went on. `limit` here is
+    // just a sanity cap against a many-hours background session ballooning
+    // the view's render cost, not something a normal walk should ever hit.
+    public List<double[]> pathForSession(long sessionId, int limit) {
+        List<double[]> out = new ArrayList<>();
+        SQLiteDatabase db = getReadableDatabase();
+        try (Cursor cur = db.rawQuery(
+                "SELECT x, y, floor_delta FROM motion_samples WHERE session_id=? ORDER BY id DESC LIMIT ?",
+                new String[]{String.valueOf(sessionId), String.valueOf(limit)})) {
+            while (cur.moveToNext()) {
+                out.add(new double[]{cur.getDouble(0), cur.getDouble(1), cur.getDouble(2)});
+            }
+        }
+        java.util.Collections.reverse(out);
+        return out;
+    }
+
     // Writes every recorded motion sample and waypoint out as one CSV file
     // (a leading UTF-8 BOM so Excel renders the Hangul column headers/labels
     // correctly instead of mojibake), for the Settings "움직임 기록 내보내기"
