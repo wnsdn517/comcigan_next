@@ -72,21 +72,25 @@ public class MappingDb extends SQLiteOpenHelper {
     // top of that, not as the primary mapping mechanism.
     @Override
     public void onCreate(SQLiteDatabase db) {
-        db.execSQL("CREATE TABLE sessions (" +
+        // IF NOT EXISTS: this also runs from onUpgrade() below (to create
+        // any table that didn't exist yet at the device's old version),
+        // where re-running a plain CREATE TABLE against a table that's
+        // already there would throw.
+        db.execSQL("CREATE TABLE IF NOT EXISTS sessions (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
                 "started_at INTEGER, ended_at INTEGER, device_model TEXT)");
-        db.execSQL("CREATE TABLE radio_scans (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS radio_scans (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "bssid TEXT, rssi INTEGER, freq INTEGER, x REAL, y REAL)");
-        db.execSQL("CREATE TABLE motion_samples (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS motion_samples (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "heading_deg REAL, pitch_deg REAL, roll_deg REAL, step_count INTEGER, x REAL, y REAL, " +
                 "floor_delta INTEGER)");
-        db.execSQL("CREATE TABLE waypoints (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS waypoints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "floor TEXT, label TEXT, x REAL, y REAL)");
         // Wi-Fi RTT (Round-Trip-Time) ranging results.
-        db.execSQL("CREATE TABLE radio_rtt (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS radio_rtt (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "bssid TEXT, distance_mm INTEGER, stddev_mm INTEGER, rssi INTEGER)");
         // Manually-tagged Wi-Fi place directory (distinct from waypoints
@@ -95,7 +99,7 @@ public class MappingDb extends SQLiteOpenHelper {
         // 표시", labeled with the place name they typed. Not session-scoped
         // -- places are meant to accumulate across sessions/days, unlike
         // per-session dead-reckoning data. See MappingDb.recognizePlace().
-        db.execSQL("CREATE TABLE place_fingerprints (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS place_fingerprints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, " +
                 "floor TEXT, label TEXT, bssid TEXT, rssi INTEGER, freq INTEGER)");
         // Manually-triggered full raw-sensor snapshots -- see
@@ -104,7 +108,7 @@ public class MappingDb extends SQLiteOpenHelper {
         // heading/pitch/roll/steps automatically on each step): this is
         // for capturing every raw signal at one specific instant the user
         // flags, e.g. right as something looks wrong on the live graphs.
-        db.execSQL("CREATE TABLE sensor_snapshots (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS sensor_snapshots (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, label TEXT, " +
                 "accel_x REAL, accel_y REAL, accel_z REAL, " +
                 "gyro_x REAL, gyro_y REAL, gyro_z REAL, " +
@@ -113,9 +117,32 @@ public class MappingDb extends SQLiteOpenHelper {
                 "top_rssi INTEGER, floor_delta INTEGER, x REAL, y REAL)");
     }
 
+    // Additive-only, never resets existing data: creates whatever tables
+    // didn't exist yet at the device's old version (onCreate() above is
+    // now idempotent via CREATE TABLE IF NOT EXISTS, so re-running it here
+    // is safe), then adds whatever columns have been introduced to
+    // already-existing tables since. An ordinary app update runs this
+    // path -- previously it called resetTables() here too and silently
+    // wiped every real recording on every single schema bump, which is
+    // exactly the "왜 움직임 기록이 사라짐" bug this replaces.
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        resetTables(db);
+        onCreate(db);
+        addColumnIfMissing(db, "motion_samples", "floor_delta", "INTEGER");
+    }
+
+    // ALTER TABLE ADD COLUMN has no IF NOT EXISTS in the SQLite versions
+    // Android ships, so this just tries it and swallows the "duplicate
+    // column name" failure -- the state that error means (the column is
+    // already there) is exactly the state this method exists to ensure.
+    // table/column/type are always this file's own hardcoded literals,
+    // never external input, so string-building the statement is safe.
+    private void addColumnIfMissing(SQLiteDatabase db, String table, String column, String type) {
+        try {
+            db.execSQL("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
+        } catch (android.database.sqlite.SQLiteException alreadyExists) {
+            // Column already there -- nothing to do.
+        }
     }
 
     // Debug builds all share one fixed signing key specifically so
@@ -125,10 +152,12 @@ public class MappingDb extends SQLiteOpenHelper {
     // right now (e.g. after testing a later commit, then an earlier one).
     // SQLiteOpenHelper's default onDowngrade() just throws
     // ("Can't downgrade database from version X to Y"), crashing the app
-    // the moment this DB is touched. Since this table only holds
-    // expendable, anonymous, on-device-only mapping data (see class doc),
-    // resetting it exactly like onUpgrade() does is a fine trade for never
-    // crashing here.
+    // the moment this DB is touched. Unlike onUpgrade() above, there's no
+    // safe additive path backward -- code that expects an older schema
+    // can't be handed columns/tables from a newer one it doesn't know
+    // about -- so this is the one remaining case that still resets. Since
+    // this table only holds expendable, anonymous, on-device-only mapping
+    // data (see class doc), that's a fine trade for never crashing here.
     @Override
     public void onDowngrade(SQLiteDatabase db, int oldVersion, int newVersion) {
         resetTables(db);
