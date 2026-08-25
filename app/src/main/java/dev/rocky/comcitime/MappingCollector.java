@@ -963,8 +963,19 @@ public class MappingCollector {
         } else if (absOffset >= FLOOR_COMMIT_THRESHOLD && verticalMotionRecently(now)) {
             // Fast enough to have outrun the baseline, big enough to be a
             // real floor, and the user demonstrably moved vertically.
-            committedFloorDelta += Math.round(offsetFloors);
-            floorRefPressureHpa = pressure; // re-anchor to the new floor
+            int floors = Math.round(offsetFloors);
+            committedFloorDelta += floors;
+            // Advance the baseline by exactly the floors just credited,
+            // rather than snapping it onto the current pressure. Snapping
+            // throws away the remainder -- it credits a whole floor for
+            // FLOOR_COMMIT_THRESHOLD (0.7) floors of real pressure change
+            // and then restarts from zero, so a continuous climb or
+            // descent accrues 1/0.7 = 1.43x too many floors. A recorded
+            // session showed exactly that: a real 4th-to-1st-floor descent
+            // tracked correctly at -3, but the long walk afterwards
+            // inflated to -16. Carrying the remainder forward makes each
+            // credited floor cost exactly one floor of pressure.
+            floorRefPressureHpa -= floors * FLOOR_HEIGHT_M / METERS_PER_HPA;
         }
         // Otherwise: between the bands, or uncorroborated -- hold, and let
         // the next samples decide. A transient (door, HVAC, gust) simply
@@ -1241,9 +1252,61 @@ public class MappingCollector {
     // phone is genuinely standing still.
     private static final double ANCHOR_MATCH_MAX_DISTANCE = 12.0;
 
-    private void applyAnchorCorrection(double ax, double ay, double matchDistance) {
-        if (isStationary) return;
+    // Dead reckoning has no absolute reference of its own, and start()
+    // deliberately resumes from the last persisted position, so error
+    // carries across sessions and compounds: a real recording showed the
+    // origin distance growing 0.6m -> 177m -> ... -> 767m over ten
+    // sessions, with nothing ever pulling it back. That also quietly
+    // defeats the anchors themselves, since they're stored in the very
+    // coordinate frame that's drifting -- an anchor tagged today lands at
+    // different coordinates than the same physical spot next week.
+    //
+    // A confident anchor match that disagrees with the current estimate by
+    // more than this is not drift to be nudged, it's mislocalization: the
+    // dead-reckoned position is simply wrong and the anchor is the better
+    // information. Re-seeding the filter there (rather than averaging
+    // toward it) is the standard "kidnapped robot" recovery, and it's what
+    // bounds per-session error instead of letting it accumulate forever.
+    private static final double ANCHOR_SNAP_M = 15.0;
+    // A hard snap acts on far less evidence than a nudge does, so it needs
+    // a correspondingly stronger match before it's allowed to move the
+    // position across the building.
+    private static final double ANCHOR_SNAP_MAX_MATCH_DISTANCE = 8.0;
+    // Nearest anchors must also agree on *where* they are, not merely match
+    // the signature well -- see MappingDb.estimateLocationFromAnchor()'s
+    // spread value. Anchors on different floors of one building share
+    // effectively the same Wi-Fi view, so without this a floor confusion
+    // could teleport the position the length of the building (a real
+    // recorded set has 4th-floor classrooms and 1st-floor rooms ~67m
+    // apart under near-identical signatures). Stairwell anchors stacked on
+    // several floors sit within a couple of meters of each other, so
+    // genuine vertical ambiguity stays comfortably inside this.
+    private static final double ANCHOR_SNAP_MAX_SPREAD_M = 10.0;
+
+    private void applyAnchorCorrection(double ax, double ay, double matchDistance, double spreadM) {
         if (matchDistance > ANCHOR_MATCH_MAX_DISTANCE) return;
+        double err = Math.hypot(ax - posX, ay - posY);
+
+        if (err > ANCHOR_SNAP_M) {
+            // Deliberately NOT gated on isStationary: standing still is
+            // exactly when a session tends to start, which is exactly when
+            // the resumed position is most likely to be stale and most
+            // worth correcting.
+            if (matchDistance > ANCHOR_SNAP_MAX_MATCH_DISTANCE) return;
+            if (spreadM > ANCHOR_SNAP_MAX_SPREAD_M) return;
+            posX = ax;
+            posY = ay;
+            posVarX = 1.0;
+            posVarY = 1.0;
+            initParticles();
+            persistPosition();
+            return;
+        }
+
+        // Ordinary in-session nudge. Still ZUPT-gated: without real
+        // movement there's no new dead-reckoning error to correct, and
+        // resampling the filter on every scan just jitters the dot.
+        if (isStationary) return;
         double std = Math.max(0.3, matchDistance * 0.03);
         updateParticlesMeasurement(ax, ay, std);
 
@@ -1629,7 +1692,8 @@ public class MappingCollector {
             // meaningful here than a wider average would be.
             double[] anchorMatch = db.estimateLocationFromAnchor(rssiByBssid, 3);
             if (anchorMatch != null) {
-                handler.post(() -> applyAnchorCorrection(anchorMatch[0], anchorMatch[1], anchorMatch[2]));
+                handler.post(() -> applyAnchorCorrection(
+                        anchorMatch[0], anchorMatch[1], anchorMatch[2], anchorMatch[3]));
             }
 
             // Perform RTT Ranging if available

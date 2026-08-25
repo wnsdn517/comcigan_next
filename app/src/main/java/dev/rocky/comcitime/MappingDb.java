@@ -595,9 +595,18 @@ public class MappingDb extends SQLiteOpenHelper {
     // when an automatic scan landed, so a confident match here is a much
     // stronger "I am definitely back at this exact spot" signal -- see
     // MappingCollector.applyAnchorCorrection(), which uses this to correct
-    // much harder than the passive blend. Same {x, y, avgMatchDistance}
-    // shape and null-when-nothing-comparable behavior as
-    // estimateLocationFromFingerprint().
+    // much harder than the passive blend. Null-when-nothing-comparable
+    // behaves as estimateLocationFromFingerprint().
+    //
+    // Returns {x, y, avgMatchDistance, spreadM}. The fourth value is how
+    // far apart in real meters the k nearest anchors actually were: RSSI
+    // distance alone says a signature matched *something* well, not that
+    // the matches agree on a place. Anchors on different floors of one
+    // building see much the same APs at much the same strength, so a
+    // confident-looking match can be split between, say, a 4th-floor
+    // classroom and a 1st-floor canteen tens of meters apart. A tight
+    // spread means the neighbors concur; a wide one means the fix is
+    // ambiguous and must not be trusted to move the position far.
     public double[] estimateLocationFromAnchor(java.util.Map<String, Integer> liveRssi, int k) {
         if (liveRssi == null || liveRssi.isEmpty()) return null;
         List<PlaceFingerprint> all = allPlaceFingerprints();
@@ -623,7 +632,16 @@ public class MappingDb extends SQLiteOpenHelper {
             wy += w * s[2];
             distSum += s[0];
         }
-        return new double[]{wx / wSum, wy / wSum, distSum / n};
+        double ex = wx / wSum, ey = wy / wSum;
+        // Spread = the furthest any contributing neighbor sits from the
+        // blended estimate, so one outlier pulling the average across the
+        // building is visible to the caller rather than averaged away.
+        double spread = 0;
+        for (int i = 0; i < n; i++) {
+            double[] s = scored.get(i);
+            spread = Math.max(spread, Math.hypot(s[1] - ex, s[2] - ey));
+        }
+        return new double[]{ex, ey, distSum / n, spread};
     }
 
     public static class PlaceMatch {
