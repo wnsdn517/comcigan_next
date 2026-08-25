@@ -126,23 +126,31 @@ public class MappingCollector {
     }
 
     // Android throttles startScan() to 4 scans / 2 minutes for a foreground
-    // app (Android 9+), i.e. a sustained ceiling of exactly one scan per
-    // 30s -- this interval sits right at that ceiling, not below it.
-    // Scanning faster doesn't get more data: past the quota the platform
-    // silently returns the PREVIOUS results instead of an error, so the
-    // only thing a shorter interval buys is re-reading stale numbers. (An
-    // app can burn the 4 through faster and then stall, which is what
-    // makes Wi-Fi analyzer apps look like they refresh every few seconds;
-    // the sustained average is identical.) Only the user disabling
-    // Settings > Developer options > Networking > Wi-Fi scan throttling
-    // actually lifts this.
+    // app (Android 9+) -- a sustained ceiling of one scan per 30s -- and
+    // past the quota it silently returns the PREVIOUS results instead of
+    // an error. But that throttle is not universal: the user can turn it
+    // off (Settings > Developer options > Networking > Wi-Fi scan
+    // throttling), some OEM builds don't enforce it the same way, and
+    // OEMs can exempt packages via config_wifiForegroundScanThrottle-
+    // ExceptionList. On a device where it's off, Wi-Fi analyzer apps
+    // really do refresh every few seconds -- for every AP in range, not
+    // just the connected one.
     //
-    // Two things do give faster signal data, and both are used here:
+    // So rather than hardcoding the throttled-case interval and giving up
+    // the fast case, this requests aggressively and lets the RESULTS
+    // decide: recordScanResults() drops any result set whose scan
+    // timestamps haven't advanced (see lastScanTimestampUs), which is
+    // exactly what a throttle-rejected request hands back. Throttled
+    // devices therefore settle at their real ~30s cadence with no
+    // duplicate fingerprint rows and no wasted work; unthrottled devices
+    // get the full rate. A rejected startScan() costs no radio activity,
+    // so polling into a closed quota is cheap.
+    //
+    // Two other sources need no quota at all and are also used:
     // scanReceiver picks up SCAN_RESULTS_AVAILABLE_ACTION from scans that
-    // ANY app or the system itself triggered (free extra fingerprints, no
-    // quota spent), and pollConnectedRssi() reads the connected AP's RSSI,
-    // which isn't a scan at all and isn't throttled.
-    private static final long SCAN_INTERVAL_MS = 30_000;
+    // ANY app or the system itself triggered, and pollConnectedRssi()
+    // reads the connected AP's RSSI, which isn't a scan.
+    private static final long SCAN_INTERVAL_MS = 3_000;
 
     // recordMotionSample() otherwise only ever fires from applyStep(), so
     // standing still, turning in place, or any movement the step detector
@@ -317,10 +325,16 @@ public class MappingCollector {
     // the startScan() throttle (see SCAN_INTERVAL_MS) doesn't apply and it
     // can be read as often as wanted. Only covers the one connected AP, but
     // that's typically the nearest/strongest one, so it's the single most
-    // position-relevant radio signal available and the only one that can
-    // update between the 30s scans.
+    // position-relevant radio signal available, and the one that keeps
+    // updating even where scans are throttled to a crawl.
     private int connectedRssi = 0; // 0 = not connected / unknown
     private String connectedBssid = "", connectedSsid = "";
+
+    // Newest ScanResult.timestamp (microseconds since boot) already
+    // recorded, so a throttle-rejected scan handing back the identical
+    // cached set can be told apart from a genuinely new observation --
+    // see recordScanResults().
+    private long lastScanTimestampUs = 0;
 
     // Latest live place-recognition result (MappingDb.recognizePlace()),
     // refreshed on every Wi-Fi scan alongside the fingerprint-correction
@@ -1226,6 +1240,7 @@ public class MappingCollector {
         posY = prefs.lastPosY();
         initParticles();
         refPressureHpa = 0f;
+        lastScanTimestampUs = 0;
         connectedRssi = 0;
         connectedBssid = "";
         connectedSsid = "";
@@ -1477,8 +1492,8 @@ public class MappingCollector {
     // Reads the associated AP's current signal strength. This is link state
     // the supplicant already maintains, not a scan, so none of
     // SCAN_INTERVAL_MS's throttling applies and this can run on the 1s
-    // motion heartbeat -- it's the only radio signal that updates between
-    // the 30s scans.
+    // motion heartbeat -- it keeps updating even on a device where scans
+    // are throttled.
     //
     // getConnectionInfo() is deprecated from API 31 in favor of pulling
     // WifiInfo off ConnectivityManager's NetworkCapabilities, but it still
@@ -1521,6 +1536,23 @@ public class MappingCollector {
         } catch (SecurityException e) {
             return; // permission revoked mid-session
         }
+        // Freshness gate (see SCAN_INTERVAL_MS): ScanResult.timestamp is
+        // when that AP was last actually seen by the radio, so a result set
+        // whose newest timestamp hasn't advanced since last time is the
+        // cached copy handed back by a throttle-rejected scan, not a new
+        // observation. Recording it again would write duplicate fingerprint
+        // rows at whatever position dead reckoning had drifted to by then
+        // -- teaching the fingerprint map that one real scan happened at
+        // several different places, which is worse than simply not
+        // recording. This is what lets the request rate above be
+        // aggressive without assuming the throttle is off.
+        long newestUs = 0;
+        for (ScanResult r : results) {
+            if (r.timestamp > newestUs) newestUs = r.timestamp;
+        }
+        if (results.isEmpty() || newestUs <= lastScanTimestampUs) return;
+        lastScanTimestampUs = newestUs;
+
         int top = -120;
         java.util.Map<String, Integer> rssiByBssid = new java.util.HashMap<>();
         java.util.Map<String, Integer> freqByBssid = new java.util.HashMap<>();
@@ -1583,7 +1615,7 @@ public class MappingCollector {
     private void recordMotionSample() {
         // Not throttled (see pollConnectedRssi()), so unlike the scan-based
         // RSSI this genuinely refreshes on every 1s heartbeat rather than
-        // repeating whatever the last 30s scan happened to see.
+        // repeating whatever the last allowed scan happened to see.
         pollConnectedRssi();
         long sid = sessionId;
         long ts = System.currentTimeMillis();

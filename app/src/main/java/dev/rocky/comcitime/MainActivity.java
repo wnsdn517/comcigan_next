@@ -2078,7 +2078,7 @@ public class MainActivity extends Activity {
         LinearLayout apRssiCard = card();
         apRssiCard.addView(eyebrow("실시간 Wi-Fi 신호 강도 (AP별)"));
         TextView apRssiHint = new TextView(this);
-        apRssiHint.setText("연결된 AP(🔗)는 실시간으로 갱신돼요. 나머지 목록은 Wi-Fi 스캔 결과라 안드로이드 제한 때문에 30초 간격으로만 갱신돼요. 개발자 옵션 > 네트워크 > 'Wi-Fi 검색 제한'을 끄면 더 자주 갱신할 수 있어요.");
+        apRssiHint.setText("연결된 AP(🔗)는 스캔이 아니라서 항상 실시간으로 갱신돼요. 나머지 목록은 Wi-Fi 스캔 결과라, 안드로이드의 스캔 제한이 켜져 있으면 30초에 한 번만 갱신돼요. 개발자 옵션 > 네트워크 > 'Wi-Fi 검색 제한'을 끄면 몇 초 간격으로 갱신되고 지도 정확도도 올라가요.");
         UiKit.styleCaption(apRssiHint);
         apRssiHint.setPadding(0, dp(2), 0, 0);
         apRssiCard.addView(apRssiHint);
