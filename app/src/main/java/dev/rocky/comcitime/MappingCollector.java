@@ -156,6 +156,12 @@ public class MappingCollector {
     // bootstrapped once from the first fused-heading reading.
     private double gyroYawDeg = Double.NaN;
     private long lastGyroTimestampNs = 0;
+    // Learned gyro Z bias (rad/s), tracked only while isStationary -- see
+    // the TYPE_GYROSCOPE case in onSensorChanged() for how it's used and
+    // why. A slow exponential moving average so a brief false-negative
+    // stationary read doesn't yank the estimate around.
+    private double gyroZBias = 0.0;
+    private static final double GYRO_BIAS_LEARN_RATE = 0.02;
     // Fraction of the gyro-vs-compass heading gap corrected per fused-
     // heading update (~SENSOR_DELAY_UI, tens of ms), applied only while
     // magneticReliable (see class doc/updateMagneticReliability()) -- the
@@ -373,11 +379,24 @@ public class MappingCollector {
                     gyroX = event.values[0]; gyroY = event.values[1]; gyroZ = event.values[2];
                     if (lastGyroTimestampNs != 0 && !Double.isNaN(gyroYawDeg)) {
                         double dt = (event.timestamp - lastGyroTimestampNs) / 1_000_000_000.0;
-                        double dYaw = Math.toDegrees(gyroZ) * dt;
+                        // A stationary phone should read exactly 0 rad/s,
+                        // but every real gyroscope has a small constant
+                        // bias, which integrating unconditionally turns
+                        // into a slow heading drift even while genuinely
+                        // not moving. gyroZBias below tracks that bias
+                        // specifically during stationary windows (the one
+                        // time the true angular velocity is known to be
+                        // zero) and this subtracts it before integrating,
+                        // so a held-still phone stops drifting instead of
+                        // only ever accumulating error.
+                        double dYaw = Math.toDegrees(gyroZ - gyroZBias) * dt;
                         gyroYawDeg = ((gyroYawDeg - dYaw) % 360 + 360) % 360;
-                        
+
                         // Heuristic Drift Elimination (HDE)
                         processHDE(gyroZ);
+                    }
+                    if (isStationary) {
+                        gyroZBias += (gyroZ - gyroZBias) * GYRO_BIAS_LEARN_RATE;
                     }
                     lastGyroTimestampNs = event.timestamp;
                     break;
@@ -861,6 +880,7 @@ public class MappingCollector {
         posVarY = 1.0;
         gyroYawDeg = Double.NaN;
         lastGyroTimestampNs = 0;
+        gyroZBias = 0.0;
         accelMinInStep = Float.MAX_VALUE;
         accelMaxInStep = -Float.MAX_VALUE;
         inGaitStreak = false;
@@ -1142,7 +1162,17 @@ public class MappingCollector {
         int steps = stepCount;
         double x = posX, y = posY;
         int floorDelta = getEstimatedFloorDelta();
-        dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y, floorDelta));
+        // Full raw sensor + signal context on every sample, not just
+        // manually-triggered snapshotSensors() ones -- needed to do any
+        // real post-hoc drift/stability analysis on an exported session
+        // instead of only ever seeing the already-fused heading/position.
+        float aX = accelX, aY = accelY, aZ = accelZ;
+        float gX = gyroX, gY = gyroY, gZ = gyroZ;
+        float mX = magX, mY = magY, mZ = magZ;
+        float pressure = pressureHpa;
+        int rssi = lastTopRssi;
+        dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y, floorDelta,
+                aX, aY, aZ, gX, gY, gZ, mX, mY, mZ, pressure, rssi));
         if (listener != null) listener.onHeadingSteps(h, steps);
         persistPosition();
     }

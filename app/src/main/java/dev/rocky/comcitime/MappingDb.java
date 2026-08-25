@@ -22,7 +22,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 7;
+    private static final int DB_VERSION = 8;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -82,10 +82,19 @@ public class MappingDb extends SQLiteOpenHelper {
         db.execSQL("CREATE TABLE IF NOT EXISTS radio_scans (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "bssid TEXT, rssi INTEGER, freq INTEGER, x REAL, y REAL)");
+        // accel/gyro/mag/pressure/top_rssi mirror sensor_snapshots below,
+        // but captured automatically on every sample instead of only when
+        // the user manually taps "센서값 기록" -- post-hoc analysis (tuning
+        // drift correction, diagnosing a bad session) needs the full raw
+        // context at every recorded point, not just hand-picked instants.
         db.execSQL("CREATE TABLE IF NOT EXISTS motion_samples (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "heading_deg REAL, pitch_deg REAL, roll_deg REAL, step_count INTEGER, x REAL, y REAL, " +
-                "floor_delta INTEGER)");
+                "floor_delta INTEGER, " +
+                "accel_x REAL, accel_y REAL, accel_z REAL, " +
+                "gyro_x REAL, gyro_y REAL, gyro_z REAL, " +
+                "mag_x REAL, mag_y REAL, mag_z REAL, " +
+                "pressure_hpa REAL, top_rssi INTEGER)");
         db.execSQL("CREATE TABLE IF NOT EXISTS waypoints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "floor TEXT, label TEXT, x REAL, y REAL)");
@@ -129,6 +138,17 @@ public class MappingDb extends SQLiteOpenHelper {
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
         onCreate(db);
         addColumnIfMissing(db, "motion_samples", "floor_delta", "INTEGER");
+        addColumnIfMissing(db, "motion_samples", "accel_x", "REAL");
+        addColumnIfMissing(db, "motion_samples", "accel_y", "REAL");
+        addColumnIfMissing(db, "motion_samples", "accel_z", "REAL");
+        addColumnIfMissing(db, "motion_samples", "gyro_x", "REAL");
+        addColumnIfMissing(db, "motion_samples", "gyro_y", "REAL");
+        addColumnIfMissing(db, "motion_samples", "gyro_z", "REAL");
+        addColumnIfMissing(db, "motion_samples", "mag_x", "REAL");
+        addColumnIfMissing(db, "motion_samples", "mag_y", "REAL");
+        addColumnIfMissing(db, "motion_samples", "mag_z", "REAL");
+        addColumnIfMissing(db, "motion_samples", "pressure_hpa", "REAL");
+        addColumnIfMissing(db, "motion_samples", "top_rssi", "INTEGER");
     }
 
     // ALTER TABLE ADD COLUMN has no IF NOT EXISTS in the SQLite versions
@@ -200,7 +220,11 @@ public class MappingDb extends SQLiteOpenHelper {
     }
 
     public void insertMotionSample(long sessionId, long ts, float headingDeg, float pitchDeg, float rollDeg,
-                                    int stepCount, double x, double y, int floorDelta) {
+                                    int stepCount, double x, double y, int floorDelta,
+                                    float accelX, float accelY, float accelZ,
+                                    float gyroX, float gyroY, float gyroZ,
+                                    float magX, float magY, float magZ,
+                                    float pressureHpa, int topRssi) {
         ContentValues cv = new ContentValues();
         cv.put("session_id", sessionId);
         cv.put("ts", ts);
@@ -211,6 +235,11 @@ public class MappingDb extends SQLiteOpenHelper {
         cv.put("x", x);
         cv.put("y", y);
         cv.put("floor_delta", floorDelta);
+        cv.put("accel_x", accelX); cv.put("accel_y", accelY); cv.put("accel_z", accelZ);
+        cv.put("gyro_x", gyroX); cv.put("gyro_y", gyroY); cv.put("gyro_z", gyroZ);
+        cv.put("mag_x", magX); cv.put("mag_y", magY); cv.put("mag_z", magZ);
+        cv.put("pressure_hpa", pressureHpa);
+        cv.put("top_rssi", topRssi);
         getWritableDatabase().insert("motion_samples", null, cv);
     }
 
@@ -587,16 +616,23 @@ public class MappingDb extends SQLiteOpenHelper {
     // opens as one sortable sheet.
     public void exportMotionCsv(java.io.Writer writer) throws java.io.IOException {
         writer.write('\uFEFF'); // Excel-friendly BOM so Hangul headers/labels don't show as mojibake
-        writer.write("type,session_id,ts,heading_deg,pitch_deg,roll_deg,step_count,x,y,floor_delta,floor,label\n");
+        writer.write("type,session_id,ts,heading_deg,pitch_deg,roll_deg,step_count,x,y,floor_delta," +
+                "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z,pressure_hpa,top_rssi,floor,label\n");
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor cur = db.rawQuery(
-                "SELECT session_id, ts, heading_deg, pitch_deg, roll_deg, step_count, x, y, floor_delta " +
+                "SELECT session_id, ts, heading_deg, pitch_deg, roll_deg, step_count, x, y, floor_delta, " +
+                        "accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z, pressure_hpa, top_rssi " +
                         "FROM motion_samples ORDER BY session_id, ts", null)) {
             while (cur.moveToNext()) {
                 writer.write(csvRow("motion", cur.getLong(0), cur.getLong(1),
                         String.valueOf(cur.getFloat(2)), String.valueOf(cur.getFloat(3)), String.valueOf(cur.getFloat(4)),
                         String.valueOf(cur.getInt(5)), cur.getDouble(6), cur.getDouble(7),
-                        String.valueOf(cur.getInt(8)), "", ""));
+                        String.valueOf(cur.getInt(8)),
+                        String.valueOf(cur.getFloat(9)), String.valueOf(cur.getFloat(10)), String.valueOf(cur.getFloat(11)),
+                        String.valueOf(cur.getFloat(12)), String.valueOf(cur.getFloat(13)), String.valueOf(cur.getFloat(14)),
+                        String.valueOf(cur.getFloat(15)), String.valueOf(cur.getFloat(16)), String.valueOf(cur.getFloat(17)),
+                        String.valueOf(cur.getFloat(18)), String.valueOf(cur.getInt(19)),
+                        "", ""));
             }
         }
         try (Cursor cur = db.rawQuery(
@@ -604,15 +640,25 @@ public class MappingDb extends SQLiteOpenHelper {
             while (cur.moveToNext()) {
                 writer.write(csvRow("waypoint", cur.getLong(0), cur.getLong(1),
                         "", "", "", "", cur.getDouble(4), cur.getDouble(5),
-                        "", cur.getString(2), cur.getString(3)));
+                        "", "", "", "", "", "", "", "", "", "", "", "",
+                        cur.getString(2), cur.getString(3)));
             }
         }
     }
 
     private static String csvRow(String type, long sessionId, long ts, String heading, String pitch, String roll,
-                                  String stepCount, double x, double y, String floorDelta, String floor, String label) {
+                                  String stepCount, double x, double y, String floorDelta,
+                                  String accelX, String accelY, String accelZ,
+                                  String gyroX, String gyroY, String gyroZ,
+                                  String magX, String magY, String magZ,
+                                  String pressureHpa, String topRssi, String floor, String label) {
         return String.join(",", type, String.valueOf(sessionId), String.valueOf(ts), heading, pitch, roll,
-                stepCount, String.valueOf(x), String.valueOf(y), csvEscape(floorDelta), csvEscape(floor), csvEscape(label)) + "\n";
+                stepCount, String.valueOf(x), String.valueOf(y), csvEscape(floorDelta),
+                csvEscape(accelX), csvEscape(accelY), csvEscape(accelZ),
+                csvEscape(gyroX), csvEscape(gyroY), csvEscape(gyroZ),
+                csvEscape(magX), csvEscape(magY), csvEscape(magZ),
+                csvEscape(pressureHpa), csvEscape(topRssi),
+                csvEscape(floor), csvEscape(label)) + "\n";
     }
 
     private static String csvEscape(String s) {
