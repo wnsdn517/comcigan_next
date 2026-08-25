@@ -236,14 +236,28 @@ public class MappingCollector {
     // threshold can't escape). What a genuine footstep has that an
     // isolated jolt never does is rhythm: it's followed by another peak
     // roughly a stride later. So a peak is only ever committed to
-    // stepCount/position once a second peak confirms it within
-    // MAX_STEP_INTERVAL_MS -- gating on *timing between peaks*, not their
-    // amplitude, so it doesn't trade off against light-footstep detection.
+    // stepCount/position once REQUIRE_CONFIRM_PEAKS peaks in a row land
+    // within MAX_STEP_INTERVAL_MS of each other -- gating on *timing
+    // between peaks*, not their amplitude, so it doesn't trade off against
+    // light-footstep detection.
     private static final long MAX_STEP_INTERVAL_MS = 1100; // ~55 steps/min lower bound
+    // Two was too easy to satisfy from incidental phone handling while
+    // seated (e.g. picking the phone up, then adjusting it, twice within
+    // ~1s) -- a real recorded session showed exactly this: sitting still
+    // for over two minutes, then two unrelated jolts landing in rhythm by
+    // chance got credited as steps and walked the position forward using
+    // whatever heading the resting phone happened to have. Three needs
+    // one more rhythmic beat, which ordinary jostling rarely produces by
+    // chance, at the cost of one extra step's worth of latency
+    // (unnoticeable) before genuine walking starts moving the dot.
+    private static final int REQUIRE_CONFIRM_PEAKS = 3;
     private boolean inGaitStreak = false;
-    private boolean pendingStepPresent = false;
-    private double pendingStepLenM = 0;
-    private double pendingStepDirDeg = 0;
+    // Buffered peaks not yet confirmed into real steps -- holds up to
+    // REQUIRE_CONFIRM_PEAKS - 1 of them while waiting for one more
+    // rhythmic peak; see onPeakDetected().
+    private final double[] pendingStepLenM = new double[REQUIRE_CONFIRM_PEAKS - 1];
+    private final double[] pendingStepDirDeg = new double[REQUIRE_CONFIRM_PEAKS - 1];
+    private int pendingStepCount = 0;
 
     // Stationary detection (short-window accelerometer variance), used to
     // trust the compass more while the phone is known to be still -- see
@@ -550,18 +564,33 @@ public class MappingCollector {
         if (inGaitStreak && gapMs <= MAX_STEP_INTERVAL_MS) {
             // Continuing an already-confirmed walking streak.
             applyStep(stepLen, dirDeg);
-        } else if (pendingStepPresent && gapMs <= MAX_STEP_INTERVAL_MS) {
-            // This peak arrived on-rhythm after the stashed one -- both are
-            // real steps, and the streak is now established.
-            commitPendingStep();
-            applyStep(stepLen, dirDeg);
-            inGaitStreak = true;
+        } else if (pendingStepCount > 0 && gapMs <= MAX_STEP_INTERVAL_MS) {
+            // This peak arrived on-rhythm after the stashed one(s).
+            if (pendingStepCount < REQUIRE_CONFIRM_PEAKS - 1) {
+                // Still short of REQUIRE_CONFIRM_PEAKS in a row -- stash
+                // this one too and keep waiting for one more.
+                pendingStepLenM[pendingStepCount] = stepLen;
+                pendingStepDirDeg[pendingStepCount] = dirDeg;
+                pendingStepCount++;
+            } else {
+                // Enough rhythmic peaks in a row -- all stashed ones plus
+                // this one are real steps, and the streak is now established.
+                for (int i = 0; i < pendingStepCount; i++) {
+                    applyStep(pendingStepLenM[i], pendingStepDirDeg[i]);
+                }
+                applyStep(stepLen, dirDeg);
+                pendingStepCount = 0;
+                inGaitStreak = true;
+            }
         } else {
             // Isolated peak, or the previous streak's rhythm broke. Don't
-            // credit it yet -- only a rhythmic follow-up peak can confirm
-            // it later, which a lone jolt never produces.
+            // credit it yet -- only REQUIRE_CONFIRM_PEAKS-1 further rhythmic
+            // follow-ups can confirm it later, which incidental jostling
+            // rarely produces by chance.
             inGaitStreak = false;
-            stashPendingStep(stepLen, dirDeg);
+            pendingStepCount = 1;
+            pendingStepLenM[0] = stepLen;
+            pendingStepDirDeg[0] = dirDeg;
         }
         lastStepTimeMs = now;
     }
@@ -583,17 +612,6 @@ public class MappingCollector {
         posVarY += STEP_PROCESS_NOISE;
         lastStepLengthM = stepLenM;
         recordMotionSample();
-    }
-
-    private void stashPendingStep(double stepLenM, double dirDeg) {
-        pendingStepPresent = true;
-        pendingStepLenM = stepLenM;
-        pendingStepDirDeg = dirDeg;
-    }
-
-    private void commitPendingStep() {
-        pendingStepPresent = false;
-        applyStep(pendingStepLenM, pendingStepDirDeg);
     }
 
     // Zero-velocity-style stationary check: true once the accelerometer
@@ -901,7 +919,7 @@ public class MappingCollector {
         accelMinInStep = Float.MAX_VALUE;
         accelMaxInStep = -Float.MAX_VALUE;
         inGaitStreak = false;
-        pendingStepPresent = false;
+        pendingStepCount = 0;
         magneticReliable = true;
         java.util.Arrays.fill(dipAngleWindow, 0f);
         dipAngleWindowIdx = 0;
