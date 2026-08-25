@@ -22,7 +22,7 @@ import java.util.List;
 // data cannot be traced back to a specific person on its own.
 public class MappingDb extends SQLiteOpenHelper {
     private static final String DB_NAME = "comcitime_mapping.db";
-    private static final int DB_VERSION = 11;
+    private static final int DB_VERSION = 12;
 
     public MappingDb(Context ctx) {
         super(ctx.getApplicationContext(), DB_NAME, null, DB_VERSION);
@@ -112,7 +112,12 @@ public class MappingDb extends SQLiteOpenHelper {
                 // floor reading that looks wrong can be traced to which
                 // part misbehaved -- the baseline drifting, or a transition
                 // being missed/falsely committed.
-                "vert_accel REAL, floor_ref_pressure REAL, floor_offset_raw REAL)");
+                "vert_accel REAL, floor_ref_pressure REAL, floor_offset_raw REAL, " +
+                // Associated AP's live RSSI. Unlike top_rssi (which comes
+                // from the last 30s-throttled scan and so repeats between
+                // scans) this is un-throttled link state, genuinely fresh
+                // on every sample -- see MappingCollector.pollConnectedRssi().
+                "connected_rssi INTEGER)");
         db.execSQL("CREATE TABLE IF NOT EXISTS waypoints (" +
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER, ts INTEGER, " +
                 "floor TEXT, label TEXT, x REAL, y REAL)");
@@ -184,6 +189,7 @@ public class MappingDb extends SQLiteOpenHelper {
         addColumnIfMissing(db, "motion_samples", "vert_accel", "REAL");
         addColumnIfMissing(db, "motion_samples", "floor_ref_pressure", "REAL");
         addColumnIfMissing(db, "motion_samples", "floor_offset_raw", "REAL");
+        addColumnIfMissing(db, "motion_samples", "connected_rssi", "INTEGER");
     }
 
     // ALTER TABLE ADD COLUMN has no IF NOT EXISTS in the SQLite versions
@@ -262,7 +268,8 @@ public class MappingDb extends SQLiteOpenHelper {
                                     float pressureHpa, int topRssi,
                                     float gravX, float gravY, float gravZ,
                                     float linAccelX, float linAccelY, float linAccelZ,
-                                    float vertAccel, float floorRefPressure, float floorOffsetRaw) {
+                                    float vertAccel, float floorRefPressure, float floorOffsetRaw,
+                                    int connectedRssi) {
         ContentValues cv = new ContentValues();
         cv.put("session_id", sessionId);
         cv.put("ts", ts);
@@ -283,6 +290,7 @@ public class MappingDb extends SQLiteOpenHelper {
         cv.put("vert_accel", vertAccel);
         cv.put("floor_ref_pressure", floorRefPressure);
         cv.put("floor_offset_raw", floorOffsetRaw);
+        cv.put("connected_rssi", connectedRssi);
         getWritableDatabase().insert("motion_samples", null, cv);
     }
 
@@ -734,13 +742,13 @@ public class MappingDb extends SQLiteOpenHelper {
         writer.write("type,session_id,ts,heading_deg,pitch_deg,roll_deg,step_count,x,y,floor_delta," +
                 "accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z,pressure_hpa,top_rssi," +
                 "grav_x,grav_y,grav_z,lin_accel_x,lin_accel_y,lin_accel_z," +
-                "vert_accel,floor_ref_pressure,floor_offset_raw,floor,label\n");
+                "vert_accel,floor_ref_pressure,floor_offset_raw,connected_rssi,floor,label\n");
         SQLiteDatabase db = getReadableDatabase();
         try (Cursor cur = db.rawQuery(
                 "SELECT session_id, ts, heading_deg, pitch_deg, roll_deg, step_count, x, y, floor_delta, " +
                         "accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z, mag_x, mag_y, mag_z, pressure_hpa, top_rssi, " +
                         "grav_x, grav_y, grav_z, lin_accel_x, lin_accel_y, lin_accel_z, " +
-                        "vert_accel, floor_ref_pressure, floor_offset_raw " +
+                        "vert_accel, floor_ref_pressure, floor_offset_raw, connected_rssi " +
                         "FROM motion_samples ORDER BY session_id, ts", null)) {
             while (cur.moveToNext()) {
                 writer.write(csvRow("motion", cur.getLong(0), cur.getLong(1),
@@ -754,6 +762,7 @@ public class MappingDb extends SQLiteOpenHelper {
                         String.valueOf(cur.getFloat(20)), String.valueOf(cur.getFloat(21)), String.valueOf(cur.getFloat(22)),
                         String.valueOf(cur.getFloat(23)), String.valueOf(cur.getFloat(24)), String.valueOf(cur.getFloat(25)),
                         String.valueOf(cur.getFloat(26)), String.valueOf(cur.getFloat(27)), String.valueOf(cur.getFloat(28)),
+                        String.valueOf(cur.getInt(29)),
                         "", ""));
             }
         }
@@ -763,7 +772,7 @@ public class MappingDb extends SQLiteOpenHelper {
                 writer.write(csvRow("waypoint", cur.getLong(0), cur.getLong(1),
                         "", "", "", "", cur.getDouble(4), cur.getDouble(5),
                         "", "", "", "", "", "", "", "", "", "", "", "",
-                        "", "", "", "", "", "", "", "", "",
+                        "", "", "", "", "", "", "", "", "", "",
                         cur.getString(2), cur.getString(3)));
             }
         }
@@ -778,6 +787,7 @@ public class MappingDb extends SQLiteOpenHelper {
                                   String gravX, String gravY, String gravZ,
                                   String linAccelX, String linAccelY, String linAccelZ,
                                   String vertAccel, String floorRefPressure, String floorOffsetRaw,
+                                  String connectedRssi,
                                   String floor, String label) {
         return String.join(",", type, String.valueOf(sessionId), String.valueOf(ts), heading, pitch, roll,
                 stepCount, String.valueOf(x), String.valueOf(y), csvEscape(floorDelta),
@@ -788,6 +798,7 @@ public class MappingDb extends SQLiteOpenHelper {
                 csvEscape(gravX), csvEscape(gravY), csvEscape(gravZ),
                 csvEscape(linAccelX), csvEscape(linAccelY), csvEscape(linAccelZ),
                 csvEscape(vertAccel), csvEscape(floorRefPressure), csvEscape(floorOffsetRaw),
+                csvEscape(connectedRssi),
                 csvEscape(floor), csvEscape(label)) + "\n";
     }
 

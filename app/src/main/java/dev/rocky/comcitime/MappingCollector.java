@@ -125,8 +125,23 @@ public class MappingCollector {
         void onHeadingSteps(float headingDeg, int steps);
     }
 
-    // Well under Android's Wi-Fi scan throttle (4 scans / 2 min foreground),
-    // so requestScan() doesn't silently get dropped by the platform.
+    // Android throttles startScan() to 4 scans / 2 minutes for a foreground
+    // app (Android 9+), i.e. a sustained ceiling of exactly one scan per
+    // 30s -- this interval sits right at that ceiling, not below it.
+    // Scanning faster doesn't get more data: past the quota the platform
+    // silently returns the PREVIOUS results instead of an error, so the
+    // only thing a shorter interval buys is re-reading stale numbers. (An
+    // app can burn the 4 through faster and then stall, which is what
+    // makes Wi-Fi analyzer apps look like they refresh every few seconds;
+    // the sustained average is identical.) Only the user disabling
+    // Settings > Developer options > Networking > Wi-Fi scan throttling
+    // actually lifts this.
+    //
+    // Two things do give faster signal data, and both are used here:
+    // scanReceiver picks up SCAN_RESULTS_AVAILABLE_ACTION from scans that
+    // ANY app or the system itself triggered (free extra fingerprints, no
+    // quota spent), and pollConnectedRssi() reads the connected AP's RSSI,
+    // which isn't a scan at all and isn't throttled.
     private static final long SCAN_INTERVAL_MS = 30_000;
 
     // recordMotionSample() otherwise only ever fires from applyStep(), so
@@ -295,6 +310,17 @@ public class MappingCollector {
     // readout (see MainActivity's mappingApRssiText) -- BSSIDs alone aren't
     // human-readable, and nothing here persists SSID to the DB.
     private java.util.Map<String, String> lastScanSsidByBssid = new java.util.HashMap<>();
+
+    // Currently-associated AP's live signal strength. Unlike everything in
+    // lastScanRssi above this does NOT come from a scan -- it's the current
+    // link state, which the supplicant keeps up to date on its own -- so
+    // the startScan() throttle (see SCAN_INTERVAL_MS) doesn't apply and it
+    // can be read as often as wanted. Only covers the one connected AP, but
+    // that's typically the nearest/strongest one, so it's the single most
+    // position-relevant radio signal available and the only one that can
+    // update between the 30s scans.
+    private int connectedRssi = 0; // 0 = not connected / unknown
+    private String connectedBssid = "", connectedSsid = "";
 
     // Latest live place-recognition result (MappingDb.recognizePlace()),
     // refreshed on every Wi-Fi scan alongside the fingerprint-correction
@@ -1025,6 +1051,9 @@ public class MappingCollector {
     public double getLastStepLengthM() { return lastStepLengthM; }
     public java.util.Map<String, Integer> getLastScanRssi() { return lastScanRssi; }
     public java.util.Map<String, String> getLastScanSsidByBssid() { return lastScanSsidByBssid; }
+    public int getConnectedRssi() { return connectedRssi; }
+    public String getConnectedSsid() { return connectedSsid; }
+    public String getConnectedBssid() { return connectedBssid; }
     public MappingDb.PlaceMatch getLastPlaceMatch() { return lastPlaceMatch; }
     public float getPitchDeg() { return pitchDeg; }
     public float getRollDeg() { return rollDeg; }
@@ -1197,6 +1226,9 @@ public class MappingCollector {
         posY = prefs.lastPosY();
         initParticles();
         refPressureHpa = 0f;
+        connectedRssi = 0;
+        connectedBssid = "";
+        connectedSsid = "";
         floorRefPressureHpa = 0f;
         committedFloorDelta = 0;
         lastFloorUpdateMs = 0;
@@ -1442,6 +1474,46 @@ public class MappingCollector {
         }
     }
 
+    // Reads the associated AP's current signal strength. This is link state
+    // the supplicant already maintains, not a scan, so none of
+    // SCAN_INTERVAL_MS's throttling applies and this can run on the 1s
+    // motion heartbeat -- it's the only radio signal that updates between
+    // the 30s scans.
+    //
+    // getConnectionInfo() is deprecated from API 31 in favor of pulling
+    // WifiInfo off ConnectivityManager's NetworkCapabilities, but it still
+    // functions and is the one call that works unchanged across minSdk
+    // 26..34 (same reasoning as startScan() above). On API 31+ SSID/BSSID
+    // come back redacted unless the caller holds a location permission --
+    // this app already requires ACCESS_FINE_LOCATION for scanning at all,
+    // so they resolve normally here, and RSSI isn't redacted regardless.
+    @SuppressWarnings("deprecation")
+    private void pollConnectedRssi() {
+        try {
+            android.net.wifi.WifiInfo info = wifiManager.getConnectionInfo();
+            if (info == null || info.getNetworkId() == -1) {
+                connectedRssi = 0;
+                connectedBssid = "";
+                connectedSsid = "";
+                return;
+            }
+            connectedRssi = info.getRssi();
+            String bssid = info.getBSSID();
+            String ssid = info.getSSID();
+            connectedBssid = bssid == null ? "" : bssid;
+            // WifiInfo wraps the SSID in quotes; strip them so this matches
+            // how ScanResult.SSID reads in the same UI.
+            if (ssid == null) ssid = "";
+            if (ssid.length() >= 2 && ssid.startsWith("\"") && ssid.endsWith("\"")) {
+                ssid = ssid.substring(1, ssid.length() - 1);
+            }
+            connectedSsid = ssid;
+        } catch (Exception ignored) {
+            // Wi-Fi off, permission revoked mid-session, OEM quirk -- the
+            // scan-based path is unaffected, so don't take anything down.
+        }
+    }
+
     private void recordScanResults() {
         List<ScanResult> results;
         try {
@@ -1509,6 +1581,10 @@ public class MappingCollector {
     }
 
     private void recordMotionSample() {
+        // Not throttled (see pollConnectedRssi()), so unlike the scan-based
+        // RSSI this genuinely refreshes on every 1s heartbeat rather than
+        // repeating whatever the last 30s scan happened to see.
+        pollConnectedRssi();
         long sid = sessionId;
         long ts = System.currentTimeMillis();
         float h = headingDeg, p = pitchDeg, r = rollDeg;
@@ -1530,9 +1606,10 @@ public class MappingCollector {
         float gvX = gravityX, gvY = gravityY, gvZ = gravityZ;
         float laX = linAccelX, laY = linAccelY, laZ = linAccelZ;
         float vAcc = vertAccelSmoothed, floorRef = floorRefPressureHpa, floorOff = getFloorOffsetRaw();
+        int connRssi = connectedRssi;
         dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y, floorDelta,
                 aX, aY, aZ, gX, gY, gZ, mX, mY, mZ, pressure, rssi,
-                gvX, gvY, gvZ, laX, laY, laZ, vAcc, floorRef, floorOff));
+                gvX, gvY, gvZ, laX, laY, laZ, vAcc, floorRef, floorOff, connRssi));
         if (listener != null) listener.onHeadingSteps(h, steps);
         persistPosition();
     }

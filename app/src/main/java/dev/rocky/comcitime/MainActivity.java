@@ -2078,7 +2078,7 @@ public class MainActivity extends Activity {
         LinearLayout apRssiCard = card();
         apRssiCard.addView(eyebrow("실시간 Wi-Fi 신호 강도 (AP별)"));
         TextView apRssiHint = new TextView(this);
-        apRssiHint.setText("주변 AP마다 개별 신호 세기예요. Wi-Fi 스캔 자체는 약 30초 간격으로만 갱신돼요 (기기 제한).");
+        apRssiHint.setText("연결된 AP(🔗)는 실시간으로 갱신돼요. 나머지 목록은 Wi-Fi 스캔 결과라 안드로이드 제한 때문에 30초 간격으로만 갱신돼요. 개발자 옵션 > 네트워크 > 'Wi-Fi 검색 제한'을 끄면 더 자주 갱신할 수 있어요.");
         UiKit.styleCaption(apRssiHint);
         apRssiHint.setPadding(0, dp(2), 0, 0);
         apRssiCard.addView(apRssiHint);
@@ -2509,6 +2509,21 @@ public class MainActivity extends Activity {
     private static final int AP_RSSI_LIST_MAX = 8;
 
     private String formatApRssiList(MappingCollector running) {
+        StringBuilder sb = new StringBuilder();
+        // The connected AP first and separately: it's the one value here
+        // that isn't throttled to the 30s scan cadence, so it actually
+        // changes every tick (see MappingCollector.pollConnectedRssi()).
+        int connRssi = running.getConnectedRssi();
+        if (connRssi != 0) {
+            String connSsid = running.getConnectedSsid();
+            if (connSsid == null || connSsid.isEmpty()) connSsid = "(연결됨)";
+            sb.append(String.format(Locale.KOREA, "🔗 %-18s %4d dBm  ← 실시간\n\n", connSsid, connRssi));
+        }
+        sb.append(formatScannedApList(running));
+        return sb.toString();
+    }
+
+    private String formatScannedApList(MappingCollector running) {
         java.util.Map<String, Integer> rssiMap = running.getLastScanRssi();
         if (rssiMap.isEmpty()) return "아직 스캔 결과가 없어요.";
         java.util.Map<String, String> ssidMap = running.getLastScanSsidByBssid();
