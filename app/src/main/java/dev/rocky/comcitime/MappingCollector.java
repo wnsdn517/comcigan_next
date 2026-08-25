@@ -108,6 +108,14 @@ public class MappingCollector {
     // so requestScan() doesn't silently get dropped by the platform.
     private static final long SCAN_INTERVAL_MS = 30_000;
 
+    // recordMotionSample() otherwise only ever fires from applyStep(), so
+    // standing still, turning in place, or any movement the step detector
+    // doesn't credit as a step left an actual gap in the recorded path --
+    // this heartbeat records current position/heading/floor at a steady
+    // cadence regardless of stepping, so the path covers the whole
+    // session continuously instead of only the moments a step landed.
+    private static final long MOTION_RECORD_INTERVAL_MS = 1000;
+
     // How many samples of live raw-sensor history to keep for the
     // Settings graphs (pushRawHistorySample() is called every
     // MainActivity.MAPPING_TICK_MS, ~300ms, while that section is open)
@@ -169,7 +177,10 @@ public class MappingCollector {
     // electrical interference breaks one or both, so both are checked.
     private static final float MAG_MIN_UT = 20f, MAG_MAX_UT = 70f; // Earth's ~25-65uT, widened for sensor noise
     private static final float DIP_VARIANCE_THRESHOLD_DEG2 = 9f; // ~3 degree stdev
-    private final float[] dipAngleWindow = new float[10];
+    // 30 samples at SENSOR_DELAY_GAME (~20ms) is the same ~600ms real-time
+    // window this was sized for back when sensors were registered at the
+    // 3x-slower SENSOR_DELAY_UI (~60ms) -- see registerIfAvailable().
+    private final float[] dipAngleWindow = new float[30];
     private int dipAngleWindowIdx = 0;
     private boolean magneticReliable = true;
 
@@ -233,7 +244,11 @@ public class MappingCollector {
     // class doc and HEADING_COMPASS_PULL_STATIONARY above.
     private static final float STATIONARY_THRESHOLD = 0.08f; // m/s^2 variance
     private boolean isStationary = true;
-    private final float[] accelWindow = new float[10];
+    // 30 samples at SENSOR_DELAY_GAME (~20ms) preserves the same ~600ms
+    // real-time window STATIONARY_THRESHOLD was tuned against at the
+    // 3x-slower SENSOR_DELAY_UI (~60ms) this used to be registered at --
+    // see registerIfAvailable().
+    private final float[] accelWindow = new float[30];
     private int accelWindowIdx = 0;
 
     // Particle Filter (Sensor Fusion)
@@ -243,7 +258,7 @@ public class MappingCollector {
 
     // Heuristic Drift Elimination (HDE)
     private static final float GYRO_VARIANCE_THRESHOLD = 0.005f;
-    private final float[] gyroWindow = new float[60]; // ~3 seconds at SENSOR_DELAY_UI
+    private final float[] gyroWindow = new float[180]; // ~3 seconds at SENSOR_DELAY_GAME (~20ms)
     private int gyroWindowIdx = 0;
 
     // Barometric Activity Recognition
@@ -682,6 +697,15 @@ public class MappingCollector {
         }
     };
 
+    private final Runnable motionRecordTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!running) return;
+            recordMotionSample();
+            handler.postDelayed(this, MOTION_RECORD_INTERVAL_MS);
+        }
+    };
+
     public MappingCollector(Context ctx) {
         this.ctx = ctx.getApplicationContext();
         this.db = new MappingDb(this.ctx);
@@ -867,6 +891,7 @@ public class MappingCollector {
         startLocationUpdates();
 
         handler.post(scanTick);
+        handler.postDelayed(motionRecordTick, MOTION_RECORD_INTERVAL_MS);
     }
 
     // Wi-Fi scan results are a system broadcast (WifiManager.SCAN_RESULTS_
@@ -896,7 +921,15 @@ public class MappingCollector {
 
     private void registerIfAvailable(int sensorType) {
         Sensor sensor = sensorManager.getDefaultSensor(sensorType);
-        if (sensor != null) sensorManager.registerListener(sensorListener, sensor, SensorManager.SENSOR_DELAY_UI);
+        // SENSOR_DELAY_GAME (~20ms/50Hz) instead of SENSOR_DELAY_UI
+        // (~60ms/16Hz): the step detector's peak search
+        // (processCustomStepDetection()) is looking for a footfall
+        // impulse that only lasts on the order of 100-200ms, so a 60ms
+        // sample spacing was coarse enough to blur or miss the actual
+        // peak. Faster sampling also tightens the stationary-variance
+        // window (accelWindow/gyroWindow) to a shorter, more current
+        // slice of real time.
+        if (sensor != null) sensorManager.registerListener(sensorListener, sensor, SensorManager.SENSOR_DELAY_GAME);
     }
 
     // GPS/GNSS is the lowest-priority signal here (★★☆☆☆, just a rough
@@ -925,6 +958,7 @@ public class MappingCollector {
         running = false;
         persistPosition(); // catches whatever happened since the last step
         handler.removeCallbacks(scanTick);
+        handler.removeCallbacks(motionRecordTick);
         try {
             ctx.unregisterReceiver(scanReceiver);
         } catch (IllegalArgumentException ignored) {
