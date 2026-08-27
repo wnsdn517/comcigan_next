@@ -35,8 +35,6 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.File;
-import java.io.FileWriter;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -191,6 +189,7 @@ public class MainActivity extends Activity {
     }
 
     private static final int REQ_EXPORT_MOTION = 3;
+    private static final int REQ_EXPORT_ALL = 4;
 
     // Lets the user record indoor-mapping motion data and export it under a
     // filename they pick/edit themselves -- ACTION_CREATE_DOCUMENT opens the
@@ -214,23 +213,35 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_EXPORT_MOTION || resultCode != RESULT_OK || data == null || data.getData() == null) {
+        boolean isExport = requestCode == REQ_EXPORT_MOTION || requestCode == REQ_EXPORT_ALL;
+        if (!isExport || resultCode != RESULT_OK || data == null || data.getData() == null) {
             return;
         }
         android.net.Uri uri = data.getData();
+        boolean motionOnly = requestCode == REQ_EXPORT_MOTION;
+        Toast.makeText(this, "내보내는 중...", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
-            boolean ok = true;
+            String error = null;
             try (java.io.OutputStream out = getContentResolver().openOutputStream(uri)) {
                 if (out == null) throw new java.io.IOException("no output stream");
                 java.io.Writer writer = new java.io.OutputStreamWriter(out, java.nio.charset.StandardCharsets.UTF_8);
-                new MappingDb(this).exportMotionCsv(writer);
+                if (motionOnly) {
+                    new MappingDb(this).exportMotionCsv(writer);
+                } else {
+                    // Whole-dataset JSON dump, plus whatever the running
+                    // collector holds only in memory (see addLiveSensorData()).
+                    JSONObject all = new MappingDb(this).exportAllData();
+                    addLiveSensorData(all);
+                    writer.write(all.toString(2));
+                }
                 writer.flush();
-            } catch (java.io.IOException e) {
-                ok = false;
+            } catch (Exception e) {
+                error = e.getMessage() == null ? e.toString() : e.getMessage();
             }
-            boolean success = ok;
+            String err = error;
             runOnUiThread(() -> Toast.makeText(this,
-                    success ? "움직임 기록을 내보냈어요." : "내보내기에 실패했어요.", Toast.LENGTH_SHORT).show());
+                    err == null ? "내보냈어요." : "내보내기에 실패했어요: " + err,
+                    err == null ? Toast.LENGTH_SHORT : Toast.LENGTH_LONG).show());
         }).start();
     }
 
@@ -2271,34 +2282,27 @@ public class MainActivity extends Activity {
     }
 
     // Dumps every mapping table (sessions/radio_scans/motion_samples/
-    // waypoints/place_fingerprints) to one JSON file under app-specific
-    // external storage -- no share sheet, no runtime storage permission
-    // needed on any supported API level, just a file the user can pull off
-    // the device with a file manager or adb. Runs off the main thread since
-    // the scan/motion tables can get large; this is an on-demand tap, not a
-    // hot path, so a plain Thread (not a shared executor) is enough.
+    // waypoints/place_fingerprints) to one JSON file the user picks the
+    // location and name for. This used to write to a fixed path under
+    // app-specific external storage, which meant the file could only be
+    // retrieved with a file manager that could reach Android/data (most
+    // can't any more) or adb -- so the export was effectively
+    // write-only. Now it goes through the same ACTION_CREATE_DOCUMENT
+    // "save as" picker the CSV export uses: still no storage permission
+    // on any supported API level, but the file lands wherever the user
+    // wants it. The actual writing happens in onActivityResult().
     private void exportMappingData() {
-        Toast.makeText(this, "내보내는 중...", Toast.LENGTH_SHORT).show();
-        new Thread(() -> {
-            try {
-                MappingDb db = new MappingDb(this);
-                JSONObject data = db.exportAllData();
-                addLiveSensorData(data);
-                File dir = getExternalFilesDir("exports");
-                if (dir == null) dir = new File(getFilesDir(), "exports");
-                if (!dir.exists()) dir.mkdirs();
-                String name = "mapping_export_" +
-                        new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.KOREA).format(new Date()) + ".json";
-                File file = new File(dir, name);
-                try (FileWriter w = new FileWriter(file)) {
-                    w.write(data.toString(2));
-                }
-                String path = file.getAbsolutePath();
-                runOnUiThread(() -> Toast.makeText(this, "저장됨: " + path, Toast.LENGTH_LONG).show());
-            } catch (Exception e) {
-                runOnUiThread(() -> Toast.makeText(this, "내보내기 실패: " + e.getMessage(), Toast.LENGTH_LONG).show());
-            }
-        }).start();
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        String suggested = "mapping_export_"
+                + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.KOREA).format(new Date()) + ".json";
+        intent.putExtra(Intent.EXTRA_TITLE, suggested);
+        try {
+            startActivityForResult(intent, REQ_EXPORT_ALL);
+        } catch (android.content.ActivityNotFoundException e) {
+            Toast.makeText(this, "파일 저장 앱을 찾을 수 없어요.", Toast.LENGTH_SHORT).show();
+        }
     }
 
     // Adds a "live_sensor_data" section to the export with everything the

@@ -22,28 +22,54 @@ public class MappingService extends Service {
 
     private MappingCollector collector;
     private final android.os.Handler checkHandler = new android.os.Handler();
+    // Whether the notification currently says "recording". Boxed so the
+    // first sync always posts, rather than depending on which state the
+    // notification happened to be built in.
+    private Boolean shownCollecting = null;
     private final Runnable checkTask = new Runnable() {
         @Override
         public void run() {
-            MappingCollector col = getCollector();
-            if (col != null) {
-                try {
-                    if (shouldCollect(col)) {
-                        if (!col.isRunning()) col.start();
-                        runningCollector = col;
-                    } else if (col.isRunning()) {
-                        col.stop();
-                        runningCollector = null;
-                    }
-                } catch (Exception e) {
-                    // See onStartCommand()'s try/catch for why this can't be
-                    // allowed to crash the service.
-                    android.util.Log.w("MappingService", "collector start/stop failed", e);
-                }
+            try {
+                applyCollectionState();
+            } catch (Exception e) {
+                // See onStartCommand()'s try/catch for why this can't be
+                // allowed to crash the service.
+                android.util.Log.w("MappingService", "collector start/stop failed", e);
             }
             checkHandler.postDelayed(this, 30000); // Check every 30s
         }
     };
+
+    // Starts or stops the collector to match shouldCollect(), and keeps the
+    // foreground notification honest about which of those actually happened
+    // -- it used to be posted once as "수집 중" and never revised, so it
+    // claimed to be recording even while stopped for being away from school.
+    private void applyCollectionState() {
+        MappingCollector col = getCollector();
+        if (col == null) return;
+        boolean collecting = shouldCollect(col);
+        if (collecting) {
+            if (!col.isRunning()) col.start();
+            runningCollector = col;
+        } else if (col.isRunning()) {
+            col.stop();
+            runningCollector = null;
+        }
+        syncNotification(collecting);
+    }
+
+    private void syncNotification(boolean collecting) {
+        if (shownCollecting != null && shownCollecting == collecting) return;
+        shownCollecting = collecting;
+        android.app.NotificationManager nm = getSystemService(android.app.NotificationManager.class);
+        if (nm == null) return;
+        try {
+            nm.notify(NotificationHelper.ID_MAPPING, NotificationHelper.buildMapping(this, collecting));
+        } catch (Exception ignored) {
+            // A notification that failed to update is not worth taking the
+            // collector down for.
+        }
+    }
 
     @Override
     public void onCreate() {
@@ -58,16 +84,13 @@ public class MappingService extends Service {
     // with ForegroundServiceDidNotStartInTimeException on a second start.
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        startForeground(NotificationHelper.ID_MAPPING, NotificationHelper.buildMapping(this));
+        // Posted before anything can throw, since the platform requires a
+        // startForeground() promptly after startForegroundService(). The
+        // real state is applied right below and corrects this if needed.
+        startForeground(NotificationHelper.ID_MAPPING,
+                NotificationHelper.buildMapping(this, shownCollecting != null && shownCollecting));
         try {
-            MappingCollector col = getCollector();
-            if (shouldCollect(col)) {
-                if (!col.isRunning()) col.start();
-                runningCollector = col;
-            } else if (col.isRunning()) {
-                col.stop();
-                runningCollector = null;
-            }
+            applyCollectionState();
         } catch (Exception e) {
             // Never let a collection-side failure crash the whole service --
             // that would leave runningCollector null forever (looks to the

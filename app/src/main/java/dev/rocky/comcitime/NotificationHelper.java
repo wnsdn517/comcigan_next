@@ -78,7 +78,14 @@ public class NotificationHelper {
         return builder.build();
     }
 
-    public static Notification buildMapping(Context ctx) {
+    // Android requires a foreground service to keep a notification posted
+    // for as long as it runs, so this can't be hidden while mapping is
+    // enabled -- but it can at least tell the truth. It used to be built
+    // once, hardcoded to "수집 중", and never updated, so it kept claiming
+    // to be collecting even when MappingService had stopped the collector
+    // for being outside the school geofence, which is most of the day.
+    // MappingService now rebuilds it whenever that state actually flips.
+    public static Notification buildMapping(Context ctx, boolean collecting) {
         ensureChannels(ctx);
         Intent openIntent = new Intent(ctx, MainActivity.class);
         PendingIntent pi = PendingIntent.getActivity(ctx, ID_MAPPING, openIntent,
@@ -86,8 +93,10 @@ public class NotificationHelper {
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(ctx, CHANNEL_MAPPING)
                 : new Notification.Builder(ctx);
-        builder.setContentTitle("실내 지도 데이터 수집 중")
-                .setContentText("동의하신 실내 지도 만들기 기능이 백그라운드에서 동작하고 있어요.")
+        builder.setContentTitle(collecting ? "실내 지도 기록 중" : "실내 지도 대기 중")
+                .setContentText(collecting
+                        ? "학교 근처라 이동 경로를 기록하고 있어요."
+                        : "학교 근처에 있을 때만 기록해요. 지금은 기록하지 않아요.")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentIntent(pi)
                 .setOngoing(true)
