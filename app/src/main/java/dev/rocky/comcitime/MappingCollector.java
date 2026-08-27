@@ -744,7 +744,11 @@ public class MappingCollector {
         // whenever the magnetometer is currently trustworthy, and only
         // fall back to the free-integrating gyroYawDeg while a magnetic
         // disturbance is detected (or before the gyro has bootstrapped).
+        // headingBiasDeg closes the loop with the Wi-Fi fixes: it carries
+        // both the compass's own error and however the phone is being
+        // carried relative to the direction of travel.
         double dirDeg = (!magneticReliable && !Double.isNaN(gyroYawDeg)) ? gyroYawDeg : headingDeg;
+        dirDeg += headingBiasDeg;
         accelMinInStep = Float.MAX_VALUE;
         accelMaxInStep = -Float.MAX_VALUE;
 
@@ -789,8 +793,13 @@ public class MappingCollector {
         isStationary = false;
         stepCount++;
         double rad = Math.toRadians(dirDeg);
-        posX += stepLenM * Math.sin(rad);
-        posY += stepLenM * Math.cos(rad);
+        double dx = stepLenM * Math.sin(rad), dy = stepLenM * Math.cos(rad);
+        posX += dx;
+        posY += dy;
+        // Leg accumulator for the Wi-Fi-vs-dead-reckoning heading
+        // comparison (see observeHeadingBias()).
+        legDrX += dx;
+        legDrY += dy;
         
         // Update Particle Filter (Motion Model)
         updateParticlesMotion(stepLenM, rad);
@@ -1117,6 +1126,7 @@ public class MappingCollector {
     public boolean isStationary() { return isStationary; }
     public boolean isInGaitStreak() { return inGaitStreak; }
     public boolean isMagneticReliable() { return magneticReliable; }
+    public double getHeadingBiasDeg() { return headingBiasDeg; }
 
     public float getPressureHpa() { return pressureHpa; }
     public int getLastTopRssi() { return lastTopRssi; }
@@ -1220,6 +1230,7 @@ public class MappingCollector {
     // reckoning.
     private void applyFingerprintCorrection(double mx, double my, double matchDistance) {
         if (isStationary) return;
+        observeHeadingBias(mx, my);
         double std = Math.max(0.5, matchDistance * 0.1);
         updateParticlesMeasurement(mx, my, std);
 
@@ -1283,6 +1294,83 @@ public class MappingCollector {
     // genuine vertical ambiguity stays comfortably inside this.
     private static final double ANCHOR_SNAP_MAX_SPREAD_M = 10.0;
 
+    // ---- Wi-Fi-observed heading bias.
+    //
+    // Wi-Fi corrections used to move position and nothing else, while
+    // heading was steered only by the compass and the gyro. So the two
+    // halves of the estimate never talked: if heading was wrong, dead
+    // reckoning kept walking off in the wrong direction and each Wi-Fi fix
+    // just dragged the position back, over and over, with the direction
+    // error itself never corrected. They fought instead of cooperating.
+    //
+    // But a pair of Wi-Fi fixes observes heading directly. Over the leg
+    // between them, dead reckoning claims one displacement vector and
+    // Wi-Fi claims another; the angle between the two IS the heading
+    // error, and feeding it back is what couples them. Being an observed
+    // *bias* rather than a compass correction, it also absorbs the phone's
+    // carry angle -- held flat, in a pocket, or facing sideways, the
+    // walking direction is whatever the fixes say it is, not wherever the
+    // handset happens to point.
+    //
+    // Legs shorter than this are mostly fingerprint noise rather than
+    // travel, and their angle means little.
+    private static final double HEADING_BIAS_MIN_LEG_M = 8.0;
+    // Fraction of each observed error folded in. Slow on purpose: a single
+    // bad fingerprint match must not be able to swing the heading.
+    private static final double HEADING_BIAS_LEARN_RATE = 0.15;
+    // Hard cap on how far one observation may move the estimate. A large
+    // error still pushes the right way, it just takes several consistent
+    // legs to get there -- so a genuine 90-degree carry offset is learnable
+    // while one outlier is not.
+    private static final double HEADING_BIAS_MAX_STEP_DEG = 10.0;
+    private double headingBiasDeg = 0.0;
+    // Leg accumulator: dead-reckoned displacement since the last fix, and
+    // the position that fix reported. NaN start = no leg open yet.
+    private double legDrX = 0, legDrY = 0;
+    private double legFixX = Double.NaN, legFixY = Double.NaN;
+
+    // Closes the current leg against a fresh Wi-Fi fix and folds the
+    // resulting heading error into headingBiasDeg, then opens the next leg
+    // from this fix. See the HEADING_BIAS_* constants for why.
+    //
+    // Deliberately compares the *measured* fix positions against the
+    // *dead-reckoned* displacement, rather than anything already blended
+    // by the particle filter -- the two have to stay independent for their
+    // disagreement to carry information.
+    private void observeHeadingBias(double fixX, double fixY) {
+        if (!Double.isNaN(legFixX)) {
+            double wifiDx = fixX - legFixX, wifiDy = fixY - legFixY;
+            double drLen = Math.hypot(legDrX, legDrY);
+            double wifiLen = Math.hypot(wifiDx, wifiDy);
+            if (drLen >= HEADING_BIAS_MIN_LEG_M && wifiLen >= HEADING_BIAS_MIN_LEG_M) {
+                // Same convention as applyStep(): x = sin(heading),
+                // y = cos(heading), so atan2(x, y) recovers the heading.
+                double drAng = Math.toDegrees(Math.atan2(legDrX, legDrY));
+                double wifiAng = Math.toDegrees(Math.atan2(wifiDx, wifiDy));
+                double err = shortestAngleDiffDeg(wifiAng, drAng);
+                double delta = err * HEADING_BIAS_LEARN_RATE;
+                if (delta > HEADING_BIAS_MAX_STEP_DEG) delta = HEADING_BIAS_MAX_STEP_DEG;
+                if (delta < -HEADING_BIAS_MAX_STEP_DEG) delta = -HEADING_BIAS_MAX_STEP_DEG;
+                // Normalised to [-180, 180) so the value reads as a signed
+                // offset rather than a compass bearing.
+                headingBiasDeg = ((headingBiasDeg + delta + 540) % 360) - 180;
+            }
+        }
+        legFixX = fixX;
+        legFixY = fixY;
+        legDrX = 0;
+        legDrY = 0;
+    }
+
+    // A snap teleports the position, so whatever displacement the open leg
+    // had accumulated no longer corresponds to travel between two fixes.
+    private void resetHeadingBiasLeg(double fixX, double fixY) {
+        legFixX = fixX;
+        legFixY = fixY;
+        legDrX = 0;
+        legDrY = 0;
+    }
+
     private void applyAnchorCorrection(double ax, double ay, double matchDistance, double spreadM) {
         if (matchDistance > ANCHOR_MATCH_MAX_DISTANCE) return;
         double err = Math.hypot(ax - posX, ay - posY);
@@ -1300,6 +1388,7 @@ public class MappingCollector {
             posVarY = 1.0;
             initParticles();
             persistPosition();
+            resetHeadingBiasLeg(ax, ay);
             return;
         }
 
@@ -1307,6 +1396,7 @@ public class MappingCollector {
         // movement there's no new dead-reckoning error to correct, and
         // resampling the filter on every scan just jitters the dot.
         if (isStationary) return;
+        observeHeadingBias(ax, ay);
         double std = Math.max(0.3, matchDistance * 0.03);
         updateParticlesMeasurement(ax, ay, std);
 
@@ -1347,6 +1437,9 @@ public class MappingCollector {
         posVarX = 1.0;
         posVarY = 1.0;
         gyroYawDeg = Double.NaN;
+        headingBiasDeg = 0.0;
+        legDrX = 0; legDrY = 0;
+        legFixX = Double.NaN; legFixY = Double.NaN;
         lastGyroTimestampNs = 0;
         gyroZBias = 0.0;
         accelMinInStep = Float.MAX_VALUE;
@@ -1735,9 +1828,10 @@ public class MappingCollector {
         float laX = linAccelX, laY = linAccelY, laZ = linAccelZ;
         float vAcc = vertAccelSmoothed, floorRef = floorRefPressureHpa, floorOff = getFloorOffsetRaw();
         int connRssi = connectedRssi;
+        float hBias = (float) headingBiasDeg;
         dbExecutor.execute(() -> db.insertMotionSample(sid, ts, h, p, r, steps, x, y, floorDelta,
                 aX, aY, aZ, gX, gY, gZ, mX, mY, mZ, pressure, rssi,
-                gvX, gvY, gvZ, laX, laY, laZ, vAcc, floorRef, floorOff, connRssi));
+                gvX, gvY, gvZ, laX, laY, laZ, vAcc, floorRef, floorOff, connRssi, hBias));
         if (listener != null) listener.onHeadingSteps(h, steps);
         persistPosition();
     }

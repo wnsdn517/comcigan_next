@@ -2469,8 +2469,9 @@ public class MainActivity extends Activity {
             // selection), the same condition that decides it there.
             String dirSource = running.isMagneticReliable() ? "나침반" : "자이로 적분 (나침반 불안정)";
             mappingStrideText.setText(String.format(Locale.KOREA,
-                    "최근 걸음 보폭(자동 추정) %.2fm  ·  방향 소스: %s",
-                    running.getLastStepLengthM(), dirSource));
+                    "최근 걸음 보폭(자동 추정) %.2fm  ·  방향 소스: %s\n" +
+                            "Wi-Fi로 학습한 방향 보정: %+.1f°",
+                    running.getLastStepLengthM(), dirSource, running.getHeadingBiasDeg()));
         }
         if (mappingApRssiText != null) {
             mappingApRssiText.setText(formatApRssiList(running));
